@@ -27,8 +27,18 @@ GitHub Actions builds **standalone** CLI binaries when you push a version tag:
 
 ```bash
 git tag v0.1.0
+git push origin master     # commit com o workflow precisa estar no default branch
+git push origin v0.1.0     # só então a tag dispara o Release
+```
+
+Se a tag já existir e o workflow não tiver rodado, apague e reenvie:
+
+```bash
+git push origin :refs/tags/v0.1.0
 git push origin v0.1.0
 ```
+
+Ou rode manualmente em **Actions → Release → Run workflow** (campo `tag`).
 
 That runs [`.github/workflows/release.yml`](.github/workflows/release.yml) and publishes a [GitHub Release](https://github.com/OWNER/REPO/releases) with:
 

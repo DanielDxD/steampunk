@@ -5,10 +5,10 @@
 Steampunk is pre-1.0 (`0.1.0-draft`). Security fixes are applied on the default
 development branch; there are no long-term support releases yet.
 
-| Version | Supported |
-|---------|-----------|
+| Version       | Supported         |
+| ------------- | ----------------- |
 | 0.1.x (draft) | Yes (best effort) |
-| older / forks | No |
+| older / forks | No                |
 
 ## Reporting a vulnerability
 
@@ -17,7 +17,7 @@ Please **do not** open a public GitHub issue for security vulnerabilities.
 Instead, report privately:
 
 1. If the repository has [GitHub Security Advisories](https://docs.github.com/en/code-security/security-advisories) enabled, use **Report a vulnerability**.
-2. Otherwise, email the maintainer: **leandrodonato** (GitHub username) via GitHub’s private contact options for the account that owns this repository.
+2. Otherwise, email the maintainer: **DanielDxD** (GitHub username) via GitHub’s private contact options for the account that owns this repository.
 
 Include:
 
