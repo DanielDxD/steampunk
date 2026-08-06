@@ -24,7 +24,9 @@ cargo test --manifest-path compiler/Cargo.toml
 - Sync: `Channel`/`Mutex`/`WaitGroup` (`int`|`string`), `std.cpu.submit`
 - Closures: `fn(params) Ret {…}`
 - Stdlib: `log`, `panic`, `env`, `process`, `fs` (sync), `time`, `string`, `List<T>`, `Result`/`Option` (any value `T`, including class/iclass)
-- Generics: `fn identity<T>(T x) T` with monomorphization; `class Box<T>` still pending
+- Serde: `@encodeProperty` / `@ignore` on fields; `std.json` / `yaml` / `toml` / `toon` `.encode` / `.decode<T>`
+- Generics: `fn identity<T>(T x) T` with monomorphization; type args on calls (`decode<User>(…)`); `class Box<T>` still pending
 - Typecheck: O(1) named-type lookup; class → base / iclass assignability
+- Types in annotations: bare `Option<T>` / `List<T>` (same as `std.Option` / `std.List`)
 
 See repo root `SPEC.md` §8 (MVP box) and §20 roadmap.

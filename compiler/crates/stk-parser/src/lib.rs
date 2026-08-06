@@ -272,10 +272,27 @@ impl Parser {
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         while !matches!(self.peek().kind, TokenKind::RBrace | TokenKind::Eof) {
+            let attrs = self.parse_attributes()?;
+            if !attrs.is_empty() && matches!(self.peek().kind, TokenKind::Fn) {
+                return Err(Diagnostic::new(
+                    "decorators are not allowed on methods",
+                    attrs[0].span,
+                ));
+            }
+            // Decorators may appear before visibility
+            if matches!(self.peek().kind, TokenKind::At) {
+                // already consumed by parse_attributes unless empty path
+            }
             let vis = self.parse_visibility()?;
             if matches!(self.peek().kind, TokenKind::Var) {
-                fields.push(self.parse_field(vis)?);
+                fields.push(self.parse_field(vis, attrs)?);
             } else if matches!(self.peek().kind, TokenKind::Fn) {
+                if !attrs.is_empty() {
+                    return Err(Diagnostic::new(
+                        "decorators are not allowed on methods",
+                        attrs[0].span,
+                    ));
+                }
                 methods.push(self.parse_method(vis)?);
             } else {
                 return Err(Diagnostic::new(
@@ -298,8 +315,53 @@ impl Parser {
         })
     }
 
-    fn parse_field(&mut self, vis: Visibility) -> Result<FieldDecl, Diagnostic> {
+    fn parse_attributes(&mut self) -> Result<Vec<Attribute>, Diagnostic> {
+        let mut attrs = Vec::new();
+        while matches!(self.peek().kind, TokenKind::At) {
+            let start = self.bump().span;
+            let (name, name_span) = self.expect_ident()?;
+            if name == "import" {
+                return Err(Diagnostic::new(
+                    "@import is only valid at file top-level",
+                    start,
+                ));
+            }
+            let mut args = Vec::new();
+            if matches!(self.peek().kind, TokenKind::LParen) {
+                self.bump();
+                if !matches!(self.peek().kind, TokenKind::RParen) {
+                    loop {
+                        args.push(self.parse_literal_expr()?);
+                        if matches!(self.peek().kind, TokenKind::Comma) {
+                            self.bump();
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                let end = self.expect(TokenKind::RParen)?;
+                attrs.push(Attribute {
+                    name,
+                    args,
+                    span: Span::new(start.start, end.end),
+                });
+            } else {
+                attrs.push(Attribute {
+                    name,
+                    args,
+                    span: Span::new(start.start, name_span.end),
+                });
+            }
+        }
+        Ok(attrs)
+    }
+
+    fn parse_field(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Result<FieldDecl, Diagnostic> {
         let start = self.expect(TokenKind::Var)?;
+        let span_start = attrs
+            .first()
+            .map(|a| a.span.start)
+            .unwrap_or(start.start);
         let (name, _) = self.expect_ident()?;
         let ty = self.parse_type()?;
         let mut default = None;
@@ -325,12 +387,13 @@ impl Parser {
         }
 
         Ok(FieldDecl {
+            attrs,
             vis,
             name,
             ty,
             default,
             accessors,
-            span: Span::new(start.start, end),
+            span: Span::new(span_start, end),
         })
     }
 
@@ -724,6 +787,34 @@ impl Parser {
                 };
                 self.expect(TokenKind::Gt)?;
                 Ok(TypeName::Future(Box::new(inner)))
+            }
+            TokenKind::Ident(ref s) if s == "Option" => {
+                self.bump();
+                self.expect(TokenKind::Lt)?;
+                let inner_span = self.peek().span;
+                let inner = self.parse_type()?;
+                self.expect(TokenKind::Gt)?;
+                if matches!(inner, TypeName::Void) {
+                    return Err(Diagnostic::new(
+                        "Option type cannot be void",
+                        inner_span,
+                    ));
+                }
+                Ok(TypeName::Option(Box::new(inner)))
+            }
+            TokenKind::Ident(ref s) if s == "List" => {
+                self.bump();
+                self.expect(TokenKind::Lt)?;
+                let elem_span = self.peek().span;
+                let elem = self.parse_type()?;
+                self.expect(TokenKind::Gt)?;
+                if matches!(elem, TypeName::Void) {
+                    return Err(Diagnostic::new(
+                        "List element type cannot be void",
+                        elem_span,
+                    ));
+                }
+                Ok(TypeName::List(Box::new(elem)))
             }
             TokenKind::Ident(ref s) if s == "std" => {
                 self.bump();
@@ -2034,6 +2125,62 @@ impl Parser {
                                 }
                             }
                         }
+                        "json" | "yaml" | "toml" | "toon" => {
+                            let format = match member.as_str() {
+                                "json" => SerdeFormat::Json,
+                                "yaml" => SerdeFormat::Yaml,
+                                "toml" => SerdeFormat::Toml,
+                                _ => SerdeFormat::Toon,
+                            };
+                            self.expect(TokenKind::Dot)?;
+                            let (method, method_span) = self.expect_ident()?;
+                            match method.as_str() {
+                                "encode" => {
+                                    self.expect(TokenKind::LParen)?;
+                                    let args = self.parse_arg_list()?;
+                                    let end = self.expect(TokenKind::RParen)?;
+                                    return Ok(Expr::Call {
+                                        callee: Callee::StdSerdeEncode {
+                                            format,
+                                            span: Span::new(tok.span.start, method_span.end),
+                                        },
+                                        args,
+                                        span: Span::new(tok.span.start, end.end),
+                                    });
+                                }
+                                "decode" => {
+                                    let type_arg = if matches!(self.peek().kind, TokenKind::Lt) {
+                                        self.bump();
+                                        let t = self.parse_type()?;
+                                        self.expect(TokenKind::Gt)?;
+                                        Some(Box::new(t))
+                                    } else {
+                                        None
+                                    };
+                                    self.expect(TokenKind::LParen)?;
+                                    let args = self.parse_arg_list()?;
+                                    let end = self.expect(TokenKind::RParen)?;
+                                    return Ok(Expr::Call {
+                                        callee: Callee::StdSerdeDecode {
+                                            format,
+                                            type_arg,
+                                            span: Span::new(tok.span.start, method_span.end),
+                                        },
+                                        args,
+                                        span: Span::new(tok.span.start, end.end),
+                                    });
+                                }
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        format!(
+                                            "expected std.{}.encode or std.{}.decode",
+                                            member, member
+                                        ),
+                                        method_span,
+                                    ));
+                                }
+                            }
+                        }
                         _ => {
                             return Err(Diagnostic::new(
                                 format!("unknown std member '{member}'"),
@@ -2071,6 +2218,7 @@ impl Parser {
                         span: Span::new(tok.span.start, end.end),
                     });
                 }
+                // Call: `f(…)` or `f<T>(…)` (not comparison `a < b`).
                 if matches!(self.peek().kind, TokenKind::LParen) {
                     self.bump();
                     let args = self.parse_arg_list()?;
@@ -2078,11 +2226,25 @@ impl Parser {
                     return Ok(Expr::Call {
                         callee: Callee::Func {
                             name,
+                            type_args: vec![],
                             span: tok.span,
                         },
                         args,
                         span: Span::new(tok.span.start, end.end),
                     });
+                }
+                if matches!(self.peek().kind, TokenKind::Lt) {
+                    if let Some((type_args, args, end)) = self.try_parse_generic_call()? {
+                        return Ok(Expr::Call {
+                            callee: Callee::Func {
+                                name,
+                                type_args,
+                                span: tok.span,
+                            },
+                            args,
+                            span: Span::new(tok.span.start, end),
+                        });
+                    }
                 }
                 Ok(Expr::Ident {
                     name,
@@ -2094,6 +2256,44 @@ impl Parser {
                 tok.span,
             )),
         }
+    }
+
+    /// `<T, U>(args)` — returns None if `<` is a comparison, restoring position.
+    fn try_parse_generic_call(
+        &mut self,
+    ) -> Result<Option<(Vec<TypeName>, Vec<Expr>, usize)>, Diagnostic> {
+        let save = self.pos;
+        if !matches!(self.peek().kind, TokenKind::Lt) {
+            return Ok(None);
+        }
+        match self.parse_call_type_args() {
+            Ok(type_args) if matches!(self.peek().kind, TokenKind::LParen) => {
+                self.bump();
+                let args = self.parse_arg_list()?;
+                let end = self.expect(TokenKind::RParen)?;
+                Ok(Some((type_args, args, end.end)))
+            }
+            _ => {
+                self.pos = save;
+                Ok(None)
+            }
+        }
+    }
+
+    /// `<T, U>` after a call name (not type params of a declaration).
+    fn parse_call_type_args(&mut self) -> Result<Vec<TypeName>, Diagnostic> {
+        self.expect(TokenKind::Lt)?;
+        let mut args = Vec::new();
+        loop {
+            args.push(self.parse_type()?);
+            if matches!(self.peek().kind, TokenKind::Comma) {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        self.expect(TokenKind::Gt)?;
+        Ok(args)
     }
 
     fn parse_arg_list(&mut self) -> Result<Vec<Expr>, Diagnostic> {

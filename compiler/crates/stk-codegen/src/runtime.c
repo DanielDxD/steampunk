@@ -913,6 +913,909 @@ int64_t stk_http_get(int64_t url) {
     return stk_tagged(1, (int64_t)(uintptr_t)stk_str_dup("AOT http.get not implemented"));
 }
 
+/* ---- typed serde (schema-driven; mirrors JIT serde_rt.rs) ---- */
+
+typedef struct StkBuf {
+    char *data;
+    size_t len;
+    size_t cap;
+} StkBuf;
+
+static void stk_buf_init(StkBuf *b) {
+    b->data = NULL;
+    b->len = 0;
+    b->cap = 0;
+}
+
+static int stk_buf_reserve(StkBuf *b, size_t need) {
+    if (b->len + need + 1 <= b->cap) return 0;
+    size_t ncap = b->cap ? b->cap * 2 : 64;
+    while (ncap < b->len + need + 1) ncap *= 2;
+    char *p = (char *)realloc(b->data, ncap);
+    if (!p) return -1;
+    b->data = p;
+    b->cap = ncap;
+    return 0;
+}
+
+static int stk_buf_append(StkBuf *b, const char *s, size_t n) {
+    if (stk_buf_reserve(b, n) != 0) return -1;
+    memcpy(b->data + b->len, s, n);
+    b->len += n;
+    b->data[b->len] = 0;
+    return 0;
+}
+
+static int stk_buf_putc(StkBuf *b, char c) {
+    return stk_buf_append(b, &c, 1);
+}
+
+static int stk_buf_puts(StkBuf *b, const char *s) {
+    return stk_buf_append(b, s, strlen(s));
+}
+
+static char *stk_buf_finish(StkBuf *b) {
+    if (!b->data) return stk_str_dup("");
+    char *out = b->data;
+    b->data = NULL;
+    b->len = b->cap = 0;
+    return out;
+}
+
+static void stk_buf_free(StkBuf *b) {
+    free(b->data);
+    b->data = NULL;
+    b->len = b->cap = 0;
+}
+
+typedef enum {
+    SCH_INT,
+    SCH_FLOAT,
+    SCH_STR,
+    SCH_BOOL,
+    SCH_OPT,
+    SCH_LIST,
+    SCH_CLASS
+} SchKind;
+
+typedef struct Schema Schema;
+struct Schema {
+    SchKind kind;
+    Schema *inner; /* opt/list */
+    int64_t size;  /* class */
+    int nfields;
+    char **wires;
+    Schema **ftys;
+    int64_t *offs;
+};
+
+static const char *sch_expect(const char *s, const char *pfx) {
+    size_t n = strlen(pfx);
+    if (strncmp(s, pfx, n) != 0) return NULL;
+    return s + n;
+}
+
+static const char *sch_parse(const char *s, Schema **out);
+
+static const char *sch_parse_field_end(const char *s, char *offbuf, size_t offbuf_sz) {
+    size_t i = 0;
+    while (s[i] && s[i] != ',' && s[i] != ')') {
+        if (i + 1 < offbuf_sz) offbuf[i] = s[i];
+        i++;
+    }
+    offbuf[i < offbuf_sz ? i : offbuf_sz - 1] = 0;
+    return s + i;
+}
+
+static const char *sch_parse(const char *s, Schema **out) {
+    while (*s == ' ' || *s == '\t') s++;
+    if (!*s) return NULL;
+    Schema *sch = (Schema *)calloc(1, sizeof(Schema));
+    if (!sch) return NULL;
+    if (*s == 'i') {
+        sch->kind = SCH_INT;
+        *out = sch;
+        return s + 1;
+    }
+    if (*s == 'f') {
+        sch->kind = SCH_FLOAT;
+        *out = sch;
+        return s + 1;
+    }
+    if (*s == 's') {
+        sch->kind = SCH_STR;
+        *out = sch;
+        return s + 1;
+    }
+    if (*s == 'b') {
+        sch->kind = SCH_BOOL;
+        *out = sch;
+        return s + 1;
+    }
+    if (*s == 'o') {
+        const char *r = sch_expect(s, "o(");
+        if (!r) {
+            free(sch);
+            return NULL;
+        }
+        Schema *inner = NULL;
+        r = sch_parse(r, &inner);
+        if (!r || *r != ')') {
+            free(sch);
+            return NULL;
+        }
+        sch->kind = SCH_OPT;
+        sch->inner = inner;
+        *out = sch;
+        return r + 1;
+    }
+    if (*s == 'L') {
+        const char *r = sch_expect(s, "L(");
+        if (!r) {
+            free(sch);
+            return NULL;
+        }
+        Schema *inner = NULL;
+        r = sch_parse(r, &inner);
+        if (!r || *r != ')') {
+            free(sch);
+            return NULL;
+        }
+        sch->kind = SCH_LIST;
+        sch->inner = inner;
+        *out = sch;
+        return r + 1;
+    }
+    if (*s == 'C') {
+        s++;
+        char *endp = NULL;
+        long size = strtol(s, &endp, 10);
+        if (endp == s || *endp != '(') {
+            free(sch);
+            return NULL;
+        }
+        s = endp + 1;
+        sch->kind = SCH_CLASS;
+        sch->size = (int64_t)size;
+        if (*s == ')') {
+            *out = sch;
+            return s + 1;
+        }
+        while (1) {
+            const char *colon = strchr(s, ':');
+            if (!colon) {
+                free(sch);
+                return NULL;
+            }
+            size_t wlen = (size_t)(colon - s);
+            char *wire = (char *)malloc(wlen + 1);
+            memcpy(wire, s, wlen);
+            wire[wlen] = 0;
+            s = colon + 1;
+            Schema *fty = NULL;
+            s = sch_parse(s, &fty);
+            if (!s || *s != ':') {
+                free(wire);
+                free(sch);
+                return NULL;
+            }
+            s++;
+            char offbuf[32];
+            s = sch_parse_field_end(s, offbuf, sizeof offbuf);
+            int64_t off = (int64_t)strtoll(offbuf, NULL, 10);
+            int n = sch->nfields + 1;
+            sch->wires = (char **)realloc(sch->wires, (size_t)n * sizeof(char *));
+            sch->ftys = (Schema **)realloc(sch->ftys, (size_t)n * sizeof(Schema *));
+            sch->offs = (int64_t *)realloc(sch->offs, (size_t)n * sizeof(int64_t));
+            sch->wires[sch->nfields] = wire;
+            sch->ftys[sch->nfields] = fty;
+            sch->offs[sch->nfields] = off;
+            sch->nfields = n;
+            if (*s == ',') {
+                s++;
+                continue;
+            }
+            if (*s == ')') {
+                *out = sch;
+                return s + 1;
+            }
+            free(sch);
+            return NULL;
+        }
+    }
+    free(sch);
+    return NULL;
+}
+
+static void sch_free(Schema *sch) {
+    if (!sch) return;
+    if (sch->inner) sch_free(sch->inner);
+    for (int i = 0; i < sch->nfields; i++) {
+        free(sch->wires[i]);
+        sch_free(sch->ftys[i]);
+    }
+    free(sch->wires);
+    free(sch->ftys);
+    free(sch->offs);
+    free(sch);
+}
+
+static int64_t stk_load_i64(int64_t obj, int64_t off) {
+    return *(int64_t *)((uint8_t *)(uintptr_t)obj + (size_t)off);
+}
+
+static void stk_store_i64(int64_t obj, int64_t off, int64_t v) {
+    *(int64_t *)((uint8_t *)(uintptr_t)obj + (size_t)off) = v;
+}
+
+/* Value IR for format writers/parsers */
+typedef enum { V_NULL, V_BOOL, V_INT, V_FLOAT, V_STR, V_ARR, V_OBJ } VKind;
+
+typedef struct Val Val;
+struct Val {
+    VKind kind;
+    int64_t i;
+    double f;
+    char *s;
+    Val **items;
+    int nitems;
+    char **keys;
+    Val **vals;
+    int nobj;
+};
+
+static Val *val_null(void) {
+    Val *v = (Val *)calloc(1, sizeof(Val));
+    v->kind = V_NULL;
+    return v;
+}
+static Val *val_bool(int b) {
+    Val *v = (Val *)calloc(1, sizeof(Val));
+    v->kind = V_BOOL;
+    v->i = b ? 1 : 0;
+    return v;
+}
+static Val *val_int(int64_t n) {
+    Val *v = (Val *)calloc(1, sizeof(Val));
+    v->kind = V_INT;
+    v->i = n;
+    return v;
+}
+static Val *val_float(double f) {
+    Val *v = (Val *)calloc(1, sizeof(Val));
+    v->kind = V_FLOAT;
+    v->f = f;
+    return v;
+}
+static Val *val_str(char *s) {
+    Val *v = (Val *)calloc(1, sizeof(Val));
+    v->kind = V_STR;
+    v->s = s;
+    return v;
+}
+static void val_free(Val *v) {
+    if (!v) return;
+    free(v->s);
+    for (int i = 0; i < v->nitems; i++) val_free(v->items[i]);
+    free(v->items);
+    for (int i = 0; i < v->nobj; i++) {
+        free(v->keys[i]);
+        val_free(v->vals[i]);
+    }
+    free(v->keys);
+    free(v->vals);
+    free(v);
+}
+
+static Val *encode_val(Schema *sch, int64_t ptr);
+static int64_t decode_val(Schema *sch, Val *v);
+
+static Val *encode_val(Schema *sch, int64_t ptr) {
+    switch (sch->kind) {
+    case SCH_INT:
+        return val_int(ptr);
+    case SCH_FLOAT: {
+        double d;
+        uint64_t bits = (uint64_t)ptr;
+        memcpy(&d, &bits, sizeof(d));
+        return val_float(d);
+    }
+    case SCH_STR:
+        return val_str(stk_str_dup((const char *)(uintptr_t)ptr));
+    case SCH_BOOL:
+        return val_bool(ptr != 0);
+    case SCH_OPT: {
+        int64_t tag = stk_load_i64(ptr, 0);
+        int64_t payload = stk_load_i64(ptr, 8);
+        if (tag == 1) return val_null();
+        return encode_val(sch->inner, payload);
+    }
+    case SCH_LIST: {
+        Val *arr = (Val *)calloc(1, sizeof(Val));
+        arr->kind = V_ARR;
+        int64_t len = stk_list_len(ptr);
+        for (int64_t i = 0; i < len; i++) {
+            Val *el = encode_val(sch->inner, stk_list_get(ptr, i));
+            arr->items = (Val **)realloc(arr->items, (size_t)(arr->nitems + 1) * sizeof(Val *));
+            arr->items[arr->nitems++] = el;
+        }
+        return arr;
+    }
+    case SCH_CLASS: {
+        Val *obj = (Val *)calloc(1, sizeof(Val));
+        obj->kind = V_OBJ;
+        for (int i = 0; i < sch->nfields; i++) {
+            int64_t slot = stk_load_i64(ptr, sch->offs[i]);
+            Val *fv = encode_val(sch->ftys[i], slot);
+            obj->keys = (char **)realloc(obj->keys, (size_t)(obj->nobj + 1) * sizeof(char *));
+            obj->vals = (Val **)realloc(obj->vals, (size_t)(obj->nobj + 1) * sizeof(Val *));
+            obj->keys[obj->nobj] = stk_str_dup(sch->wires[i]);
+            obj->vals[obj->nobj] = fv;
+            obj->nobj++;
+        }
+        return obj;
+    }
+    }
+    return val_null();
+}
+
+static int64_t decode_val(Schema *sch, Val *v) {
+    switch (sch->kind) {
+    case SCH_INT:
+        if (v->kind == V_INT) return v->i;
+        return 0;
+    case SCH_FLOAT:
+        if (v->kind == V_FLOAT) {
+            uint64_t bits;
+            memcpy(&bits, &v->f, sizeof(bits));
+            return (int64_t)bits;
+        }
+        if (v->kind == V_INT) {
+            double d = (double)v->i;
+            uint64_t bits;
+            memcpy(&bits, &d, sizeof(bits));
+            return (int64_t)bits;
+        }
+        return 0;
+    case SCH_STR:
+        if (v->kind == V_STR) return (int64_t)(uintptr_t)stk_str_dup(v->s ? v->s : "");
+        return (int64_t)(uintptr_t)stk_str_dup("");
+    case SCH_BOOL:
+        if (v->kind == V_BOOL) return v->i;
+        return 0;
+    case SCH_OPT: {
+        int64_t p = (int64_t)(uintptr_t)stk_alloc(16);
+        if (v->kind == V_NULL) {
+            stk_store_i64(p, 0, 1);
+            stk_store_i64(p, 8, 0);
+            return p;
+        }
+        stk_store_i64(p, 0, 0);
+        stk_store_i64(p, 8, decode_val(sch->inner, v));
+        return p;
+    }
+    case SCH_LIST: {
+        int64_t list = stk_list_new();
+        if (v->kind == V_ARR) {
+            for (int i = 0; i < v->nitems; i++) {
+                stk_list_push(list, decode_val(sch->inner, v->items[i]));
+            }
+        }
+        return list;
+    }
+    case SCH_CLASS: {
+        int64_t obj = (int64_t)(uintptr_t)stk_alloc(sch->size);
+        if (v->kind != V_OBJ) return obj;
+        for (int i = 0; i < sch->nfields; i++) {
+            Val *fv = NULL;
+            for (int j = 0; j < v->nobj; j++) {
+                if (strcmp(v->keys[j], sch->wires[i]) == 0) {
+                    fv = v->vals[j];
+                    break;
+                }
+            }
+            if (!fv) {
+                if (sch->ftys[i]->kind == SCH_OPT) {
+                    int64_t p = (int64_t)(uintptr_t)stk_alloc(16);
+                    stk_store_i64(p, 0, 1);
+                    stk_store_i64(p, 8, 0);
+                    stk_store_i64(obj, sch->offs[i], p);
+                }
+                continue;
+            }
+            stk_store_i64(obj, sch->offs[i], decode_val(sch->ftys[i], fv));
+        }
+        return obj;
+    }
+    }
+    return 0;
+}
+
+static int json_escape_to(StkBuf *b, const char *s) {
+    if (stk_buf_putc(b, '"') != 0) return -1;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p == '"' || *p == '\\') {
+            if (stk_buf_putc(b, '\\') != 0 || stk_buf_putc(b, (char)*p) != 0) return -1;
+        } else if (*p == '\n') {
+            if (stk_buf_puts(b, "\\n") != 0) return -1;
+        } else if (*p == '\r') {
+            if (stk_buf_puts(b, "\\r") != 0) return -1;
+        } else if (*p == '\t') {
+            if (stk_buf_puts(b, "\\t") != 0) return -1;
+        } else {
+            if (stk_buf_putc(b, (char)*p) != 0) return -1;
+        }
+    }
+    return stk_buf_putc(b, '"');
+}
+
+static int val_to_json(StkBuf *b, Val *v) {
+    char num[64];
+    switch (v->kind) {
+    case V_NULL:
+        return stk_buf_puts(b, "null");
+    case V_BOOL:
+        return stk_buf_puts(b, v->i ? "true" : "false");
+    case V_INT:
+        snprintf(num, sizeof num, "%lld", (long long)v->i);
+        return stk_buf_puts(b, num);
+    case V_FLOAT:
+        snprintf(num, sizeof num, "%.17g", v->f);
+        if (!strchr(num, '.') && !strchr(num, 'e') && !strchr(num, 'E')) {
+            strcat(num, ".0");
+        }
+        return stk_buf_puts(b, num);
+    case V_STR:
+        return json_escape_to(b, v->s ? v->s : "");
+    case V_ARR: {
+        if (stk_buf_putc(b, '[') != 0) return -1;
+        for (int i = 0; i < v->nitems; i++) {
+            if (i && stk_buf_putc(b, ',') != 0) return -1;
+            if (val_to_json(b, v->items[i]) != 0) return -1;
+        }
+        return stk_buf_putc(b, ']');
+    }
+    case V_OBJ: {
+        if (stk_buf_putc(b, '{') != 0) return -1;
+        for (int i = 0; i < v->nobj; i++) {
+            if (i && stk_buf_putc(b, ',') != 0) return -1;
+            if (json_escape_to(b, v->keys[i]) != 0) return -1;
+            if (stk_buf_putc(b, ':') != 0) return -1;
+            if (val_to_json(b, v->vals[i]) != 0) return -1;
+        }
+        return stk_buf_putc(b, '}');
+    }
+    }
+    return -1;
+}
+
+typedef struct {
+    const char *s;
+    size_t i;
+    size_t n;
+} Jp;
+
+static int jp_peek(Jp *p) {
+    return p->i < p->n ? (unsigned char)p->s[p->i] : -1;
+}
+static void jp_bump(Jp *p) {
+    if (p->i < p->n) p->i++;
+}
+static void jp_skip(Jp *p) {
+    while (1) {
+        int c = jp_peek(p);
+        if (c == ' ' || c == '\n' || c == '\r' || c == '\t') jp_bump(p);
+        else break;
+    }
+}
+static int jp_eat(Jp *p, const char *lit) {
+    for (; *lit; lit++) {
+        if (jp_peek(p) != (unsigned char)*lit) return -1;
+        jp_bump(p);
+    }
+    return 0;
+}
+
+static Val *jp_parse_value(Jp *p);
+
+static Val *jp_parse_string(Jp *p) {
+    if (jp_eat(p, "\"") != 0) return NULL;
+    StkBuf b;
+    stk_buf_init(&b);
+    while (1) {
+        int c = jp_peek(p);
+        if (c < 0) {
+            stk_buf_free(&b);
+            return NULL;
+        }
+        if (c == '"') {
+            jp_bump(p);
+            char *s = stk_buf_finish(&b);
+            return val_str(s);
+        }
+        if (c == '\\') {
+            jp_bump(p);
+            int e = jp_peek(p);
+            if (e < 0) {
+                stk_buf_free(&b);
+                return NULL;
+            }
+            char ch = (char)e;
+            if (e == 'n') ch = '\n';
+            else if (e == 'r') ch = '\r';
+            else if (e == 't') ch = '\t';
+            jp_bump(p);
+            if (stk_buf_putc(&b, ch) != 0) {
+                stk_buf_free(&b);
+                return NULL;
+            }
+        } else {
+            jp_bump(p);
+            if (stk_buf_putc(&b, (char)c) != 0) {
+                stk_buf_free(&b);
+                return NULL;
+            }
+        }
+    }
+}
+
+static Val *jp_parse_number(Jp *p) {
+    size_t start = p->i;
+    if (jp_peek(p) == '-') jp_bump(p);
+    while (jp_peek(p) >= '0' && jp_peek(p) <= '9') jp_bump(p);
+    int is_float = 0;
+    if (jp_peek(p) == '.') {
+        is_float = 1;
+        jp_bump(p);
+        while (jp_peek(p) >= '0' && jp_peek(p) <= '9') jp_bump(p);
+    }
+    if (jp_peek(p) == 'e' || jp_peek(p) == 'E') {
+        is_float = 1;
+        jp_bump(p);
+        if (jp_peek(p) == '+' || jp_peek(p) == '-') jp_bump(p);
+        while (jp_peek(p) >= '0' && jp_peek(p) <= '9') jp_bump(p);
+    }
+    char tmp[128];
+    size_t len = p->i - start;
+    if (len >= sizeof tmp) return NULL;
+    memcpy(tmp, p->s + start, len);
+    tmp[len] = 0;
+    if (is_float) return val_float(strtod(tmp, NULL));
+    return val_int((int64_t)strtoll(tmp, NULL, 10));
+}
+
+static Val *jp_parse_array(Jp *p) {
+    if (jp_eat(p, "[") != 0) return NULL;
+    jp_skip(p);
+    Val *arr = (Val *)calloc(1, sizeof(Val));
+    arr->kind = V_ARR;
+    if (jp_peek(p) == ']') {
+        jp_bump(p);
+        return arr;
+    }
+    while (1) {
+        Val *el = jp_parse_value(p);
+        if (!el) {
+            val_free(arr);
+            return NULL;
+        }
+        arr->items = (Val **)realloc(arr->items, (size_t)(arr->nitems + 1) * sizeof(Val *));
+        arr->items[arr->nitems++] = el;
+        jp_skip(p);
+        if (jp_peek(p) == ',') {
+            jp_bump(p);
+            continue;
+        }
+        if (jp_peek(p) == ']') {
+            jp_bump(p);
+            return arr;
+        }
+        val_free(arr);
+        return NULL;
+    }
+}
+
+static Val *jp_parse_object(Jp *p) {
+    if (jp_eat(p, "{") != 0) return NULL;
+    jp_skip(p);
+    Val *obj = (Val *)calloc(1, sizeof(Val));
+    obj->kind = V_OBJ;
+    if (jp_peek(p) == '}') {
+        jp_bump(p);
+        return obj;
+    }
+    while (1) {
+        jp_skip(p);
+        Val *ks = jp_parse_string(p);
+        if (!ks) {
+            val_free(obj);
+            return NULL;
+        }
+        jp_skip(p);
+        if (jp_eat(p, ":") != 0) {
+            val_free(ks);
+            val_free(obj);
+            return NULL;
+        }
+        Val *vv = jp_parse_value(p);
+        if (!vv) {
+            val_free(ks);
+            val_free(obj);
+            return NULL;
+        }
+        obj->keys = (char **)realloc(obj->keys, (size_t)(obj->nobj + 1) * sizeof(char *));
+        obj->vals = (Val **)realloc(obj->vals, (size_t)(obj->nobj + 1) * sizeof(Val *));
+        obj->keys[obj->nobj] = ks->s;
+        ks->s = NULL;
+        val_free(ks);
+        obj->vals[obj->nobj] = vv;
+        obj->nobj++;
+        jp_skip(p);
+        if (jp_peek(p) == ',') {
+            jp_bump(p);
+            continue;
+        }
+        if (jp_peek(p) == '}') {
+            jp_bump(p);
+            return obj;
+        }
+        val_free(obj);
+        return NULL;
+    }
+}
+
+static Val *jp_parse_value(Jp *p) {
+    jp_skip(p);
+    int c = jp_peek(p);
+    if (c == 'n') {
+        if (jp_eat(p, "null") != 0) return NULL;
+        return val_null();
+    }
+    if (c == 't') {
+        if (jp_eat(p, "true") != 0) return NULL;
+        return val_bool(1);
+    }
+    if (c == 'f') {
+        if (jp_eat(p, "false") != 0) return NULL;
+        return val_bool(0);
+    }
+    if (c == '"') return jp_parse_string(p);
+    if (c == '[') return jp_parse_array(p);
+    if (c == '{') return jp_parse_object(p);
+    if (c == '-' || (c >= '0' && c <= '9')) return jp_parse_number(p);
+    return NULL;
+}
+
+static Val *parse_json_c(const char *text) {
+    Jp p = {text, 0, strlen(text)};
+    Val *v = jp_parse_value(&p);
+    if (!v) return NULL;
+    jp_skip(&p);
+    if (p.i != p.n) {
+        val_free(v);
+        return NULL;
+    }
+    return v;
+}
+
+static int val_to_yaml(StkBuf *b, Val *v, int indent) {
+    (void)indent;
+    return val_to_json(b, v);
+}
+
+static Val *parse_yaml_scalar_c(const char *s) {
+    if (!s || !*s || strcmp(s, "null") == 0 || strcmp(s, "~") == 0) return val_null();
+    if (strcmp(s, "true") == 0) return val_bool(1);
+    if (strcmp(s, "false") == 0) return val_bool(0);
+    if (s[0] == '"' || s[0] == '[' || s[0] == '{') {
+        Val *j = parse_json_c(s);
+        return j ? j : val_str(stk_str_dup(s));
+    }
+    char *endp = NULL;
+    long long n = strtoll(s, &endp, 10);
+    if (endp && *endp == 0) return val_int((int64_t)n);
+    double d = strtod(s, &endp);
+    if (endp && *endp == 0) return val_float(d);
+    return val_str(stk_str_dup(s));
+}
+
+static Val *parse_yaml_simple_c(const char *text) {
+    while (*text == ' ' || *text == '\n' || *text == '\t') text++;
+    if (*text == '{' || *text == '[') return parse_json_c(text);
+    Val *obj = (Val *)calloc(1, sizeof(Val));
+    obj->kind = V_OBJ;
+    char *copy = stk_str_dup(text);
+    char *save = NULL;
+    for (char *line = strtok_r(copy, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        while (*line == ' ' || *line == '\t') line++;
+        if (!*line || *line == '#') continue;
+        char *colon = strchr(line, ':');
+        if (!colon) continue;
+        *colon = 0;
+        char *key = line;
+        char *val = colon + 1;
+        while (*val == ' ' || *val == '\t') val++;
+        while (key[0] && (key[strlen(key) - 1] == ' ' || key[strlen(key) - 1] == '\t'))
+            key[strlen(key) - 1] = 0;
+        obj->keys = (char **)realloc(obj->keys, (size_t)(obj->nobj + 1) * sizeof(char *));
+        obj->vals = (Val **)realloc(obj->vals, (size_t)(obj->nobj + 1) * sizeof(Val *));
+        obj->keys[obj->nobj] = stk_str_dup(key);
+        obj->vals[obj->nobj] = parse_yaml_scalar_c(val);
+        obj->nobj++;
+    }
+    free(copy);
+    return obj;
+}
+
+static int toml_scalar(StkBuf *b, Val *v) {
+    if (v->kind == V_NULL) return -1;
+    if (v->kind == V_OBJ) return -1;
+    if (v->kind == V_ARR) {
+        if (stk_buf_putc(b, '[') != 0) return -1;
+        for (int i = 0; i < v->nitems; i++) {
+            if (i && stk_buf_puts(b, ", ") != 0) return -1;
+            if (toml_scalar(b, v->items[i]) != 0) return -1;
+        }
+        return stk_buf_putc(b, ']');
+    }
+    return val_to_json(b, v);
+}
+
+static int val_to_toml(StkBuf *b, Val *v) {
+    if (v->kind != V_OBJ) return -1;
+    for (int i = 0; i < v->nobj; i++) {
+        if (v->vals[i]->kind == V_NULL || v->vals[i]->kind == V_OBJ) continue;
+        if (stk_buf_puts(b, v->keys[i]) != 0 || stk_buf_puts(b, " = ") != 0) return -1;
+        if (toml_scalar(b, v->vals[i]) != 0) return -1;
+        if (stk_buf_putc(b, '\n') != 0) return -1;
+    }
+    for (int i = 0; i < v->nobj; i++) {
+        if (v->vals[i]->kind != V_OBJ) continue;
+        if (stk_buf_puts(b, "\n[") != 0 || stk_buf_puts(b, v->keys[i]) != 0 ||
+            stk_buf_puts(b, "]\n") != 0)
+            return -1;
+        Val *nested = v->vals[i];
+        for (int j = 0; j < nested->nobj; j++) {
+            if (nested->vals[j]->kind == V_NULL) continue;
+            if (stk_buf_puts(b, nested->keys[j]) != 0 || stk_buf_puts(b, " = ") != 0)
+                return -1;
+            if (toml_scalar(b, nested->vals[j]) != 0) return -1;
+            if (stk_buf_putc(b, '\n') != 0) return -1;
+        }
+    }
+    return 0;
+}
+
+static Val *parse_toml_simple_c(const char *text) {
+    Val *root = (Val *)calloc(1, sizeof(Val));
+    root->kind = V_OBJ;
+    char *section = NULL;
+    char *copy = stk_str_dup(text);
+    char *save = NULL;
+    for (char *line = strtok_r(copy, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        while (*line == ' ' || *line == '\t') line++;
+        if (!*line || *line == '#') continue;
+        size_t L = strlen(line);
+        if (line[0] == '[' && L >= 2 && line[L - 1] == ']') {
+            free(section);
+            section = (char *)malloc(L - 1);
+            memcpy(section, line + 1, L - 2);
+            section[L - 2] = 0;
+            /* ensure section object exists */
+            int found = 0;
+            for (int i = 0; i < root->nobj; i++) {
+                if (strcmp(root->keys[i], section) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                root->keys = (char **)realloc(root->keys, (size_t)(root->nobj + 1) * sizeof(char *));
+                root->vals = (Val **)realloc(root->vals, (size_t)(root->nobj + 1) * sizeof(Val *));
+                root->keys[root->nobj] = stk_str_dup(section);
+                Val *nested = (Val *)calloc(1, sizeof(Val));
+                nested->kind = V_OBJ;
+                root->vals[root->nobj] = nested;
+                root->nobj++;
+            }
+            continue;
+        }
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char *key = line;
+        char *val = eq + 1;
+        while (*val == ' ' || *val == '\t') val++;
+        while (key[0] && (key[strlen(key) - 1] == ' ' || key[strlen(key) - 1] == '\t'))
+            key[strlen(key) - 1] = 0;
+        Val *target = root;
+        if (section) {
+            for (int i = 0; i < root->nobj; i++) {
+                if (strcmp(root->keys[i], section) == 0) {
+                    target = root->vals[i];
+                    break;
+                }
+            }
+        }
+        target->keys = (char **)realloc(target->keys, (size_t)(target->nobj + 1) * sizeof(char *));
+        target->vals = (Val **)realloc(target->vals, (size_t)(target->nobj + 1) * sizeof(Val *));
+        target->keys[target->nobj] = stk_str_dup(key);
+        target->vals[target->nobj] = parse_yaml_scalar_c(val);
+        target->nobj++;
+    }
+    free(section);
+    free(copy);
+    return root;
+}
+
+static int val_to_toon(StkBuf *b, Val *v, int indent) {
+    (void)indent;
+    return val_to_json(b, v);
+}
+
+static Val *parse_toon_c(const char *text) {
+    while (*text == ' ' || *text == '\n' || *text == '\t') text++;
+    if (*text == '{' || *text == '[') {
+        Val *j = parse_json_c(text);
+        if (j) return j;
+    }
+    return parse_yaml_simple_c(text);
+}
+
+int64_t stk_serde_encode(int64_t format, int64_t schema, int64_t value) {
+    const char *schs = (const char *)(uintptr_t)schema;
+    Schema *sch = NULL;
+    if (!sch_parse(schs, &sch) || !sch) {
+        return (int64_t)(uintptr_t)stk_str_dup("");
+    }
+    Val *v = encode_val(sch, value);
+    StkBuf b;
+    stk_buf_init(&b);
+    int rc = -1;
+    if (format == 1)
+        rc = val_to_yaml(&b, v, 0);
+    else if (format == 2)
+        rc = val_to_toml(&b, v);
+    else if (format == 3)
+        rc = val_to_toon(&b, v, 0);
+    else
+        rc = val_to_json(&b, v);
+    val_free(v);
+    sch_free(sch);
+    if (rc != 0) {
+        stk_buf_free(&b);
+        return (int64_t)(uintptr_t)stk_str_dup("");
+    }
+    return (int64_t)(uintptr_t)stk_buf_finish(&b);
+}
+
+int64_t stk_serde_decode(int64_t format, int64_t schema, int64_t text) {
+    const char *schs = (const char *)(uintptr_t)schema;
+    const char *t = (const char *)(uintptr_t)text;
+    Schema *sch = NULL;
+    const char *rest = sch_parse(schs, &sch);
+    if (!rest || *rest || !sch) {
+        return stk_tagged(1, (int64_t)(uintptr_t)stk_str_dup("bad schema"));
+    }
+    Val *v = NULL;
+    if (format == 1)
+        v = parse_yaml_simple_c(t);
+    else if (format == 2)
+        v = parse_toml_simple_c(t);
+    else if (format == 3)
+        v = parse_toon_c(t);
+    else
+        v = parse_json_c(t);
+    if (!v) {
+        sch_free(sch);
+        return stk_tagged(1, (int64_t)(uintptr_t)stk_str_dup("parse error"));
+    }
+    int64_t out = decode_val(sch, v);
+    val_free(v);
+    sch_free(sch);
+    return stk_tagged(0, out);
+}
+
 void stk_task_yield(void) { sched_yield(); }
 
 int64_t stk_cancel_token_new(void) {

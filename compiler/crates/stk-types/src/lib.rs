@@ -273,6 +273,9 @@ pub struct FieldInfo {
     pub vis: Visibility,
     pub defining_class: String,
     pub default: Option<LitValue>,
+    /// Wire name for serde (`@encodeProperty`); None → use field name.
+    pub serde_name: Option<String>,
+    pub serde_ignore: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +285,8 @@ pub struct PropInfo {
     pub defining_class: String,
     pub getter_symbol: Option<String>,
     pub setter_symbol: Option<String>,
+    pub serde_name: Option<String>,
+    pub serde_ignore: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -672,6 +677,19 @@ pub enum CheckedExpr {
         index: usize,
         body: Vec<CheckedStmt>,
         captures: Vec<String>,
+    },
+    /// `std.{json,yaml,toml,toon}.encode(value)`
+    SerdeEncode {
+        format: SerdeFormat,
+        value: Box<CheckedExpr>,
+        schema: String,
+    },
+    /// `std.{json,yaml,toml,toon}.decode<T>(text)` → Result<T,string>
+    SerdeDecode {
+        format: SerdeFormat,
+        text: Box<CheckedExpr>,
+        schema: String,
+        ty: Ty,
     },
 }
 
@@ -1215,6 +1233,8 @@ fn free_locals(stmts: &[CheckedStmt]) -> Vec<String> {
                     }
                 }
             }
+            CheckedExpr::SerdeEncode { value, .. } => walk_expr_free(value, declared, used),
+            CheckedExpr::SerdeDecode { text, .. } => walk_expr_free(text, declared, used),
             _ => {}
         }
     }
@@ -1449,6 +1469,8 @@ fn build_classes(
                 return Err(Diagnostic::new("field cannot be void", f.span));
             }
 
+            let (serde_name, serde_ignore) = parse_field_serde_attrs(&f.attrs, f.span)?;
+
             if let Some(acc) = &f.accessors {
                 let getter_symbol = acc
                     .getter
@@ -1466,6 +1488,8 @@ fn build_classes(
                         defining_class: c.name.clone(),
                         getter_symbol,
                         setter_symbol,
+                        serde_name,
+                        serde_ignore,
                     },
                 );
             } else {
@@ -1490,6 +1514,8 @@ fn build_classes(
                         vis: f.vis,
                         defining_class: c.name.clone(),
                         default,
+                        serde_name,
+                        serde_ignore,
                     },
                 );
                 offset += SLOT;
@@ -3400,9 +3426,14 @@ fn check_expr(
                         && matches!(op, BinOp::Eq | BinOp::Ne)
                     {
                         Ty::String
+                    } else if lt == Ty::Bool
+                        && rt == Ty::Bool
+                        && matches!(op, BinOp::Eq | BinOp::Ne)
+                    {
+                        Ty::Bool
                     } else {
                         return Err(Diagnostic::new(
-                            "comparison operators require matching numeric or string operands",
+                            "comparison operators require matching numeric, string, or bool operands",
                             *span,
                         ));
                     };
@@ -4374,7 +4405,85 @@ fn check_expr(
                 }
                 Ok((Ty::CancelToken, CheckedExpr::CancelTokenNew))
             }
-            Callee::Func { name, .. } => {
+            Callee::StdSerdeEncode { format, .. } => {
+                if !ctx.has_std {
+                    return Err(Diagnostic::new(
+                        "serde APIs require @import \"std\"",
+                        *span,
+                    ));
+                }
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "encode expects one value argument",
+                        *span,
+                    ));
+                }
+                let (ty, e) = check_expr(&args[0], env, ctx)?;
+                if !is_serializable_ty(&ty) {
+                    return Err(Diagnostic::new(
+                        format!("type {:?} is not serializable", ty),
+                        args[0].span(),
+                    ));
+                }
+                let schema = build_serde_schema(&ty, ctx.classes, *span)?;
+                Ok((
+                    Ty::String,
+                    CheckedExpr::SerdeEncode {
+                        format: *format,
+                        value: Box::new(e),
+                        schema,
+                    },
+                ))
+            }
+            Callee::StdSerdeDecode {
+                format,
+                type_arg,
+                ..
+            } => {
+                if !ctx.has_std {
+                    return Err(Diagnostic::new(
+                        "serde APIs require @import \"std\"",
+                        *span,
+                    ));
+                }
+                if args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "decode expects one string argument",
+                        *span,
+                    ));
+                }
+                let Some(ta) = type_arg else {
+                    return Err(Diagnostic::new(
+                        "decode requires an explicit type argument: decode<T>(…)",
+                        *span,
+                    ));
+                };
+                let target = Ty::from_ast_at(ta, ctx.type_names, *span)?;
+                if !is_serializable_ty(&target) {
+                    return Err(Diagnostic::new(
+                        format!("type {:?} is not serializable", target),
+                        *span,
+                    ));
+                }
+                let (ty, e) = check_expr(&args[0], env, ctx)?;
+                if ty != Ty::String {
+                    return Err(Diagnostic::new(
+                        "decode expects a string",
+                        args[0].span(),
+                    ));
+                }
+                let schema = build_serde_schema(&target, ctx.classes, *span)?;
+                Ok((
+                    ty_result(target.clone(), Ty::String),
+                    CheckedExpr::SerdeDecode {
+                        format: *format,
+                        text: Box::new(e),
+                        schema,
+                        ty: target,
+                    },
+                ))
+            }
+            Callee::Func { name, type_args: _, .. } => {
                 // Local / captured function value shadows global name.
                 if let Some(Ty::Fn { params, ret }) = env.get(name).cloned() {
                     if args.len() != params.len() {
@@ -4606,6 +4715,129 @@ fn lookup_method<'a>(
             span,
         )
     })
+}
+
+
+fn parse_field_serde_attrs(
+    attrs: &[Attribute],
+    span: Span,
+) -> Result<(Option<String>, bool), Diagnostic> {
+    let mut serde_name = None;
+    let mut serde_ignore = false;
+    for a in attrs {
+        match a.name.as_str() {
+            "ignore" => {
+                if !a.args.is_empty() {
+                    return Err(Diagnostic::new("@ignore takes no arguments", a.span));
+                }
+                if serde_name.is_some() {
+                    return Err(Diagnostic::new(
+                        "cannot combine @ignore and @encodeProperty",
+                        a.span,
+                    ));
+                }
+                serde_ignore = true;
+            }
+            "encodeProperty" => {
+                if a.args.len() != 1 {
+                    return Err(Diagnostic::new(
+                        "@encodeProperty expects one string argument",
+                        a.span,
+                    ));
+                }
+                let Expr::StringLit { value, .. } = &a.args[0] else {
+                    return Err(Diagnostic::new(
+                        "@encodeProperty argument must be a string literal",
+                        a.span,
+                    ));
+                };
+                if serde_ignore {
+                    return Err(Diagnostic::new(
+                        "cannot combine @ignore and @encodeProperty",
+                        a.span,
+                    ));
+                }
+                serde_name = Some(value.clone());
+            }
+            other => {
+                return Err(Diagnostic::new(
+                    format!("unknown decorator '@{other}'"),
+                    a.span,
+                ));
+            }
+        }
+    }
+    let _ = span;
+    Ok((serde_name, serde_ignore))
+}
+
+fn is_serializable_ty(ty: &Ty) -> bool {
+    match ty {
+        Ty::Int | Ty::Float | Ty::String | Ty::Bool => true,
+        Ty::Class(_) => true,
+        Ty::List { elem } | Ty::Option { inner: elem } => is_serializable_ty(elem),
+        _ => false,
+    }
+}
+
+/// Compact schema for runtime serde (see runtime `stk_serde_*`).
+fn build_serde_schema(
+    ty: &Ty,
+    classes: &HashMap<String, ClassInfo>,
+    span: Span,
+) -> Result<String, Diagnostic> {
+    match ty {
+        Ty::Int => Ok("i".into()),
+        Ty::Float => Ok("f".into()),
+        Ty::String => Ok("s".into()),
+        Ty::Bool => Ok("b".into()),
+        Ty::Option { inner } => Ok(format!("o({})", build_serde_schema(inner, classes, span)?)),
+        Ty::List { elem } => Ok(format!("L({})", build_serde_schema(elem, classes, span)?)),
+        Ty::Class(name) => {
+            let Some(cinfo) = classes.get(name) else {
+                return Err(Diagnostic::new(format!("unknown class '{name}'"), span));
+            };
+            let mut parts = Vec::new();
+            let mut fields: Vec<_> = cinfo.fields.iter().collect();
+            fields.sort_by_key(|(_, f)| f.offset);
+            for (fname, finfo) in fields {
+                if finfo.serde_ignore {
+                    continue;
+                }
+                if !is_serializable_ty(&finfo.ty) {
+                    return Err(Diagnostic::new(
+                        format!(
+                            "field '{fname}' of type {:?} is not serializable (use @ignore)",
+                            finfo.ty
+                        ),
+                        span,
+                    ));
+                }
+                let wire = finfo
+                    .serde_name
+                    .clone()
+                    .unwrap_or_else(|| fname.clone());
+                let sub = build_serde_schema(&finfo.ty, classes, span)?;
+                parts.push(format!("{wire}:{sub}:{}", finfo.offset));
+            }
+            for (pname, pinfo) in &cinfo.props {
+                if pinfo.serde_ignore {
+                    continue;
+                }
+                return Err(Diagnostic::new(
+                    format!(
+                        "property '{pname}' cannot be serialized yet (use a storage field)"
+                    ),
+                    span,
+                ));
+            }
+            Ok(format!("C{}({})", cinfo.size, parts.join(",")))
+        }
+        other => Err(Diagnostic::new(
+            format!("type {:?} is not serializable", other),
+            span,
+        )),
+    }
 }
 
 fn is_subclass(ctx: &CheckCtx<'_>, child: &str, ancestor: &str) -> bool {

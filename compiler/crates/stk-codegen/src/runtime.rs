@@ -612,7 +612,7 @@ unsafe fn libc_strlen(ptr: *const u8) -> usize {
     n
 }
 
-fn cstr_to_string(ptr: i64) -> String {
+pub(crate) fn cstr_to_string(ptr: i64) -> String {
     if ptr == 0 {
         return String::new();
     }
@@ -623,7 +623,7 @@ fn cstr_to_string(ptr: i64) -> String {
     }
 }
 
-fn string_to_cstr(s: String) -> i64 {
+pub(crate) fn string_to_cstr(s: String) -> i64 {
     let mut bytes = s.into_bytes();
     bytes.push(0);
     let len = bytes.len();
@@ -637,7 +637,7 @@ fn string_to_cstr(s: String) -> i64 {
     }
 }
 
-fn make_tagged(tag: i64, payload: i64) -> i64 {
+pub(crate) fn make_tagged(tag: i64, payload: i64) -> i64 {
     unsafe {
         let p = malloc(16) as *mut i64;
         if p.is_null() {

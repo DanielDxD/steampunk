@@ -209,6 +209,43 @@ Regras:
 4. Implementações de métodos de `iclass` devem ser `pub` (o contrato da interface é público).
 5. Visibilidade de módulo (`pub class`) é independente da visibilidade dos membros.
 
+### 4.4 Decorators
+
+Decorators anotam **membros** de `class`/`struct` (campos e propriedades). Sintaxe:
+
+```stk
+@name
+@name("arg")
+@name(1, true)
+```
+
+Ordem no membro: decorators → `pub`|`priv`|`prot` → `var` …
+
+```stk
+struct User {
+    @encodeProperty("user_name")
+    pub var name string
+    pub var age int
+    @ignore
+    pub var password string
+}
+```
+
+Regras:
+
+1. `@import` permanece **diretiva de módulo** só no topo do arquivo — não é decorator de membro.
+2. Decorators de usuário definidos em Steampunk **não** existem na v0.1; só built-ins.
+3. Built-ins de serialização (valem para `std.json` / `yaml` / `toml` / `toon`):
+
+| Decorator | Efeito |
+|-----------|--------|
+| `@encodeProperty(string wire)` | Nome da chave no wire (encode e decode) |
+| `@ignore` | Campo excluído do encode/decode |
+
+4. `@ignore` e `@encodeProperty` juntos no mesmo membro = erro.
+5. Decorators em métodos = erro.
+6. Sem `@encodeProperty`, o nome wire é o identificador do campo.
+
 ---
 
 ## 5. Tipos
@@ -909,6 +946,26 @@ Módulos da stdlib:
 | `std.task` | 0.4 | `yield`, `CancellationToken` |
 | `std.http` | 0.3 | `get`/`post` → `Future<Result<string, string>>` |
 | `std.net` | 0.3 | TCP básico async |
+| `std.json` | pronto | `encode(T) string`; `decode<T>(string) Result<T,string>` |
+| `std.yaml` | pronto | idem (YAML 1.2 subset ↔ mesmo modelo) |
+| `std.toml` | pronto | idem (TOML; sem `null` — ver abaixo) |
+| `std.toon` | pronto | idem ([TOON](https://github.com/toon-format/spec) ↔ modelo JSON) |
+
+### 14.1 Serialização tipada
+
+```stk
+var text = std.json.encode(user)
+match std.json.decode<User>(text) {
+    ok(u) => { /* … */ }
+    err(e) => { std.log("$1", e) }
+}
+```
+
+- `encode` monomorphiza pelo tipo do argumento; gera serializer em compile-time.
+- `decode<T>` exige type arg explícito **ou** tipo esperado no contexto (`var u User = std.json.decode(text)`).
+- Tipos serializáveis: `bool`/`int`/`float`/`string`, `class`/`struct`, `List<T>`, `Option<T>`, aninhados.
+- `Option.none`: JSON/YAML/TOON → `null` ou chave omitida; TOML → chave omitida no encode; chave ausente → `none` no decode.
+- Campos `@ignore` e membros não-serializáveis (`Future`, channels, funções, …) não entram; estes últimos em campo sem `@ignore` = erro de compilação.
 
 Exemplo mínimo:
 
@@ -992,6 +1049,7 @@ Regras:
 3. Compilação por **monomorphização** (uma cópia por instanciação concreta).
 4. `std.List<T>`, `std.Result<T,E>`, `std.Option<T>`, `Channel<T>`, `Mutex<T>`, `RwLock<T>`, `Future<T>` aceitam qualquer tipo de valor `T` (builtin parametrizado + monomorphização de genéricos de usuário).
 5. Inferência de args de tipo a partir do uso quando não ambígua; senão exigir anotação.
+6. Type args em **chamadas**: `f<T>(args)` (ex.: `std.json.decode<User>(s)`).
 
 ---
 
@@ -1134,7 +1192,9 @@ ClassBody      = "{" { FieldDecl | MethodDecl } "}" ;
 IClassBody     = "{" { InterfaceMethod } "}" ;
 InterfaceMethod= [ "async" ] Ident "(" ParamList ")" [ Type ] ;
 MethodDecl     = Visibility [ "async" ] "fn" Ident "(" ParamList ")" [ Type ] Block ;
-FieldDecl      = Visibility "var" Ident Type ( [ "=" Literal ] | PropBody ) ;
+FieldDecl      = { Decorator } Visibility "var" Ident Type ( [ "=" Literal ] | PropBody ) ;
+Decorator      = "@" Ident [ "(" [ DecoratorArg { "," DecoratorArg } ] ")" ] ;
+DecoratorArg   = StringLit | IntLit | BoolLit ;
 PropBody       = "{" { "get" Block | "set" "(" Param ")" Block } "}" ;
 
 Block          = "{" { Stmt } "}" ;
@@ -1289,7 +1349,7 @@ async fn main() {
 | Fase | Entrega |
 |------|---------|
 | 0.1 | Frontend + async thread-backed (worker pool); OOP; `struct`; closures; `float`; Result/Option/List; env/process/fs/time/string/panic; Channel/Mutex/Future int\|string; `std.cpu.submit` — **mínimo usável** |
-| 0.2 | Worker pool spawn; `std.parallel.map`; `RwLock`; `struct` keyword; genéricos (parcial — monomorfização completa em progresso); borrow checker (parcial) |
+| 0.2 | Worker pool; parallel.map; RwLock; struct; genéricos fn + type-args em calls; decorators `@encodeProperty`/`@ignore`; `std.json`/`yaml`/`toml`/`toon` encode/decode tipado |
 | 0.3 | Manifesto `.stkm` (`deps`/`script`/`test`); cache global stub; `std.http.get` (http://); formatter `fmt` |
 | 0.4 | LSP mínimo (`steampunk-lsp`); `std.task.yield` + `CancellationToken` |
 
@@ -1314,6 +1374,8 @@ Das capturas em `main.stk` e decisões de núcleo:
 13. Paralelismo CPU via `std.parallel` / `std.cpu.submit`; runtime M:N work-stealing.
 14. Manifesto do projeto é `.stkm` (não TOML), ex.: `manager.stkm`.
 15. Dependências pré-compiladas (`.stkb` + `.stkmap`) ficam em cache **global** (`~/.steampunk/deps`); reutilizadas entre projetos na mesma versão; copiadas para o binário do app só em tempo de compilação/link.
+16. Decorators de membro (`@name` / `@name(…)`); built-ins de serde `@encodeProperty` / `@ignore`; `@import` não é decorator.
+17. Serialização tipada via `std.json` / `std.yaml` / `std.toml` / `std.toon` com monomorphização.
 
 ---
 

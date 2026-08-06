@@ -1,4 +1,5 @@
 mod runtime;
+mod serde_rt;
 
 use std::collections::HashMap;
 use std::fs;
@@ -38,6 +39,7 @@ pub use runtime::{
     stk_string_slice, stk_task_yield, stk_time_now_ms, stk_waitgroup_add, stk_waitgroup_done,
     stk_waitgroup_new, stk_waitgroup_wait, stk_waitgroup_wait_future,
 };
+pub use serde_rt::{stk_serde_decode, stk_serde_encode};
 
 fn async_wrap_name(fn_name: &str) -> String {
     format!("__async_wrap_{fn_name}")
@@ -234,6 +236,8 @@ struct EmitCtx<'a, M: Module> {
     string_contains_id: FuncId,
     string_from_int_id: FuncId,
     string_parse_int_id: FuncId,
+    serde_encode_id: FuncId,
+    serde_decode_id: FuncId,
     strings: &'a StrMap,
     vars: HashMap<String, Variable>,
     next_var: u32,
@@ -247,11 +251,20 @@ fn collect_string_lits(program: &CheckedProgram) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     let mut seen = HashMap::<Vec<u8>, ()>::new();
     let mut collect = |e: &CheckedExpr| {
-        if let CheckedExpr::StringLit(s) = e {
-            let b = s.as_bytes().to_vec();
-            if seen.insert(b.clone(), ()).is_none() {
-                out.push(b);
+        match e {
+            CheckedExpr::StringLit(s) => {
+                let b = s.as_bytes().to_vec();
+                if seen.insert(b.clone(), ()).is_none() {
+                    out.push(b);
+                }
             }
+            CheckedExpr::SerdeEncode { schema, .. } | CheckedExpr::SerdeDecode { schema, .. } => {
+                let b = schema.as_bytes().to_vec();
+                if seen.insert(b.clone(), ()).is_none() {
+                    out.push(b);
+                }
+            }
+            _ => {}
         }
     };
     for f in &program.functions {
@@ -440,6 +453,8 @@ fn walk_expr(expr: &CheckedExpr, f: &mut impl FnMut(&CheckedExpr)) {
         }
         CheckedExpr::ParallelMap { list, .. } => walk_expr(list, f),
         CheckedExpr::HttpGet { url } => walk_expr(url, f),
+        CheckedExpr::SerdeEncode { value, .. } => walk_expr(value, f),
+        CheckedExpr::SerdeDecode { text, .. } => walk_expr(text, f),
         CheckedExpr::CancelTokenCancel { token }
         | CheckedExpr::CancelTokenIsCancelled { token } => walk_expr(token, f),
         CheckedExpr::ListPush { list, value } => {
@@ -846,6 +861,8 @@ pub fn jit_run(program: &CheckedProgram) -> Result<()> {
     jit_builder.symbol("stk_string_contains", stk_string_contains as *const u8);
     jit_builder.symbol("stk_string_from_int", stk_string_from_int as *const u8);
     jit_builder.symbol("stk_string_parse_int", stk_string_parse_int as *const u8);
+    jit_builder.symbol("stk_serde_encode", stk_serde_encode as *const u8);
+    jit_builder.symbol("stk_serde_decode", stk_serde_decode as *const u8);
     let mut module = JITModule::new(jit_builder);
 
     let lits = collect_string_lits(program);
@@ -1022,6 +1039,8 @@ struct RuntimeIds {
     string_contains_id: FuncId,
     string_from_int_id: FuncId,
     string_parse_int_id: FuncId,
+    serde_encode_id: FuncId,
+    serde_decode_id: FuncId,
 }
 
 fn ternary_i64_signature(ret: bool) -> Signature {
@@ -1273,6 +1292,12 @@ fn declare_runtime<M: Module>(module: &mut M) -> Result<RuntimeIds> {
         string_parse_int_id: module
             .declare_function("stk_string_parse_int", Linkage::Import, &unary_i64_signature(true))
             .map_err(|e| anyhow!("{e}"))?,
+        serde_encode_id: module
+            .declare_function("stk_serde_encode", Linkage::Import, &ternary_i64_signature(true))
+            .map_err(|e| anyhow!("{e}"))?,
+        serde_decode_id: module
+            .declare_function("stk_serde_decode", Linkage::Import, &ternary_i64_signature(true))
+            .map_err(|e| anyhow!("{e}"))?,
     })
 }
 
@@ -1505,6 +1530,8 @@ fn make_emit<'a, M: Module>(
         string_contains_id: runtime.string_contains_id,
         string_from_int_id: runtime.string_from_int_id,
         string_parse_int_id: runtime.string_parse_int_id,
+        serde_encode_id: runtime.serde_encode_id,
+        serde_decode_id: runtime.serde_decode_id,
         strings,
         vars: HashMap::new(),
         next_var: 0,
@@ -3201,6 +3228,61 @@ impl<'a, M: Module> EmitCtx<'a, M> {
             }
             CheckedExpr::StdStringParseInt { s } => {
                 self.emit_runtime_call(builder, self.string_parse_int_id, &[s], None)
+            }
+            CheckedExpr::SerdeEncode {
+                format,
+                value,
+                schema,
+            } => {
+                use stk_ast::SerdeFormat;
+                let fmt = match format {
+                    SerdeFormat::Json => 0,
+                    SerdeFormat::Yaml => 1,
+                    SerdeFormat::Toml => 2,
+                    SerdeFormat::Toon => 3,
+                };
+                let fmt_v = builder.ins().iconst(types::I64, fmt);
+                let (schema_ptr, _) = self.emit_expr(
+                    builder,
+                    &CheckedExpr::StringLit(schema.clone()),
+                )?;
+                let (val, _) = self.emit_expr(builder, value)?;
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.serde_encode_id, builder.func);
+                let call = builder.ins().call(
+                    fref,
+                    &[fmt_v, schema_ptr.unwrap(), val.unwrap()],
+                );
+                Ok((Some(builder.inst_results(call)[0]), Some(-1)))
+            }
+            CheckedExpr::SerdeDecode {
+                format,
+                text,
+                schema,
+                ..
+            } => {
+                use stk_ast::SerdeFormat;
+                let fmt = match format {
+                    SerdeFormat::Json => 0,
+                    SerdeFormat::Yaml => 1,
+                    SerdeFormat::Toml => 2,
+                    SerdeFormat::Toon => 3,
+                };
+                let fmt_v = builder.ins().iconst(types::I64, fmt);
+                let (schema_ptr, _) = self.emit_expr(
+                    builder,
+                    &CheckedExpr::StringLit(schema.clone()),
+                )?;
+                let (txt, _) = self.emit_expr(builder, text)?;
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.serde_decode_id, builder.func);
+                let call = builder.ins().call(
+                    fref,
+                    &[fmt_v, schema_ptr.unwrap(), txt.unwrap()],
+                );
+                Ok((Some(builder.inst_results(call)[0]), None))
             }
             CheckedExpr::AsyncBlock {
                 index,

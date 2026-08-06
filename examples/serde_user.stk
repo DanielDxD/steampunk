@@ -1,0 +1,139 @@
+@import "std"
+
+struct Address {
+    pub var city string
+    pub var zip int
+
+    pub fn new(string city, int zip) Address {
+        self.city = city
+        self.zip = zip
+        return self
+    }
+}
+
+struct User {
+    @encodeProperty("user_name")
+    pub var name string
+    pub var age int
+    @ignore
+    pub var password string
+    pub var active bool
+    pub var nickname Option<string>
+    pub var tags List<string>
+    pub var home Address
+
+    pub fn new(
+        string name,
+        int age,
+        string password,
+        bool active,
+        Option<string> nickname,
+        List<string> tags,
+        Address home
+    ) User {
+        self.name = name
+        self.age = age
+        self.password = password
+        self.active = active
+        self.nickname = nickname
+        self.tags = tags
+        self.home = home
+        return self
+    }
+}
+
+fn checkRoundTrip(string label, string text, User u) {
+    match std.json.decode<User>(text) {
+        ok(v) => {
+            if v.age != u.age {
+                std.panic("age mismatch")
+            }
+            if v.active != u.active {
+                std.panic("active mismatch")
+            }
+            if v.home.zip != u.home.zip {
+                std.panic("zip mismatch")
+            }
+            if v.tags.len() != u.tags.len() {
+                std.panic("tags len")
+            }
+            if !std.string.contains(text, "user_name") {
+                std.panic("wire name missing in text")
+            }
+            std.log("$1 ok name=$2 age=$3 city=$4", label, v.name, v.age, v.home.city)
+        }
+        err(e) => {
+            std.log("decode fail $1: $2", label, e)
+            std.panic("decode failed")
+        }
+    }
+}
+
+fn main() {
+    var tags = std.List<string>.new()
+    tags.push("rust")
+    tags.push("stk")
+    var home = new Address("Lisbon", 1000)
+    var u = new User(
+        "Ada",
+        36,
+        "secret",
+        true,
+        std.Option<string>.some("A"),
+        tags,
+        home
+    )
+
+    var json = std.json.encode(u)
+    std.log("json=$1", json)
+    if !std.string.contains(json, "user_name") {
+        std.panic("missing wire name")
+    }
+    if std.string.contains(json, "password") {
+        std.panic("password must be ignored")
+    }
+    if std.string.contains(json, "secret") {
+        std.panic("secret leaked")
+    }
+    checkRoundTrip("json", json, u)
+
+    var yaml = std.yaml.encode(u)
+    std.log("yaml=$1", yaml)
+    match std.yaml.decode<User>(yaml) {
+        ok(v) => { std.log("yaml ok=$1", v.name) }
+        err(e) => {
+            std.log("yaml err=$1", e)
+            std.panic("yaml decode")
+        }
+    }
+
+    var toml = std.toml.encode(u)
+    std.log("toml=$1", toml)
+    match std.toml.decode<User>(toml) {
+        ok(v) => { std.log("toml ok=$1", v.name) }
+        err(e) => {
+            std.log("toml err=$1", e)
+            std.panic("toml decode")
+        }
+    }
+
+    var toon = std.toon.encode(u)
+    std.log("toon=$1", toon)
+    match std.toon.decode<User>(toon) {
+        ok(v) => { std.log("toon ok=$1", v.name) }
+        err(e) => {
+            std.log("toon err=$1", e)
+            std.panic("toon decode")
+        }
+    }
+
+    match std.json.decode<User>("{not json") {
+        ok(v) => {
+            std.log("unexpected ok=$1", v.name)
+            std.panic("invalid json should err")
+        }
+        err(e) => { std.log("invalid json err ok") }
+    }
+
+    std.log("serde ok")
+}

@@ -1343,6 +1343,123 @@ fn run_universal_types() {
 }
 
 #[test]
+fn run_serde_user() {
+    let output = Command::new(steampunk_bin())
+        .args(["run"])
+        .arg(examples_dir().join("serde_user.stk"))
+        .output()
+        .expect("run");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("user_name")
+            && stdout.contains("json ok")
+            && stdout.contains("yaml ok")
+            && stdout.contains("toml ok")
+            && stdout.contains("toon ok")
+            && stdout.contains("invalid json err ok")
+            && stdout.contains("serde ok")
+            && !stdout.contains("secret"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn build_and_execute_serde_user() {
+    let out = std::env::temp_dir().join(format!("stk-serde-{}", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+
+    let output = Command::new(steampunk_bin())
+        .args(["build"])
+        .arg(examples_dir().join("serde_user.stk"))
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .expect("build steampunk");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let run = Command::new(&out).output().expect("exec binary");
+    assert!(run.status.success(), "stderr={}", String::from_utf8_lossy(&run.stderr));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("serde ok"), "stdout={stdout}");
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn serde_rejects_decorator_on_method() {
+    let dir = std::env::temp_dir().join(format!("stk-serde-neg-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("bad.stk");
+    std::fs::write(
+        &path,
+        r#"
+@import "std"
+struct S {
+    pub var x int
+    @ignore
+    pub fn new() S { return self }
+}
+fn main() {}
+"#,
+    )
+    .unwrap();
+    let output = Command::new(steampunk_bin())
+        .args(["run"])
+        .arg(&path)
+        .output()
+        .expect("run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("decorators are not allowed on methods"),
+        "stderr={stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn serde_rejects_non_serializable_field() {
+    let dir = std::env::temp_dir().join(format!("stk-serde-fut-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("bad.stk");
+    std::fs::write(
+        &path,
+        r#"
+@import "std"
+struct S {
+    pub var f Future<int>
+    pub fn new() S { return self }
+}
+fn main() {
+    var s = new S()
+    std.log("$1", std.json.encode(s))
+}
+"#,
+    )
+    .unwrap();
+    let output = Command::new(steampunk_bin())
+        .args(["run"])
+        .arg(&path)
+        .output()
+        .expect("run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not serializable") || stderr.contains("serialize"),
+        "stderr={stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn stkm_unit_parses() {
     let dir = std::env::temp_dir().join(format!("stk-deps-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

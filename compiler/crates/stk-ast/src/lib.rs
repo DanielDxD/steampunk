@@ -46,7 +46,15 @@ pub struct ClassDecl {
 }
 
 #[derive(Debug, Clone)]
+pub struct Attribute {
+    pub name: String,
+    pub args: Vec<Expr>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct FieldDecl {
+    pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub name: String,
     pub ty: TypeName,
@@ -361,7 +369,12 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 pub enum Callee {
-    Func { name: String, span: Span },
+    Func {
+        name: String,
+        /// Explicit type args at call site (`f<T>(…)`).
+        type_args: Vec<TypeName>,
+        span: Span,
+    },
     /// Call a function value / closure: `expr(args)`
     Value { expr: Box<Expr> },
     StdLog { span: Span },
@@ -431,12 +444,31 @@ pub enum Callee {
     StdTaskYield { span: Span },
     /// `std.task.CancellationToken.new()`
     StdCancelTokenNew { span: Span },
+    /// `std.json|yaml|toml|toon.encode(value)`
+    StdSerdeEncode {
+        format: SerdeFormat,
+        span: Span,
+    },
+    /// `std.json|yaml|toml|toon.decode<T>(text)` — type_arg optional if inferred later
+    StdSerdeDecode {
+        format: SerdeFormat,
+        type_arg: Option<Box<TypeName>>,
+        span: Span,
+    },
     /// `Future.join(a, b)` — two `Future<T>` → `Future<[T; 2]>` (any value T)
     FutureJoin { span: Span },
     /// `Future.race(a, b)` — two `Future<T>` → `Future<T>`
     FutureRace { span: Span },
     /// `Future.ready(v)` — T → `Future<T>` (any value T)
     FutureReady { span: Span },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerdeFormat {
+    Json,
+    Yaml,
+    Toml,
+    Toon,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

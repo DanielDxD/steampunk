@@ -28,6 +28,9 @@ true false null self super as import module defer
 | Spawn | `spawn foo()` / `spawn { … }` → `void` |
 | Format | `"x=$1 y=$2", a, b` |
 | Float | `3.14`, type `float` |
+| Decorator | `@encodeProperty("wire")` / `@ignore` before `pub var` |
+| Serde | `std.json.encode(u)` / `std.json.decode<User>(s)` (+ yaml/toml/toon) |
+| Type args | `f<T>(…)` on calls |
 
 ## Visibility
 
@@ -38,7 +41,7 @@ true false null self super as import module defer
 ## Types (v0.1 mínimo usável)
 
 `bool` `int` `float` `string` `void`  
-`[T; N]` · `Future<T>` · `std.Result` / `std.Option` / `std.List<T>` (any value T: primitives, class, iclass)  
+`[T; N]` · `Future<T>` · `List<T>` / `Option<T>` / `std.Result` (any value T: primitives, class, iclass)  
 (`i8`…`u64`/`f32`/`char`/`T?` planejados)
 
 ## Stdlib v0.1
@@ -53,6 +56,7 @@ true false null self super as import module defer
 | `std.time.sleepMs` / `nowMs` | `std.sleep` alias |
 | `std.string.*` | len, concat, slice, contains, fromInt, parseInt |
 | `std.List<T>` | new, push, get, set, len |
+| `std.json` / `yaml` / `toml` / `toon` | `encode` / `decode<T>` → `Result` |
 | `std.sync.Channel/WaitGroup/Mutex` | int\|string elems |
 | `std.cpu.submit` | `fn() int\|string` → `Future<T>` |
 
