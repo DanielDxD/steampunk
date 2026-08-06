@@ -1,0 +1,11 @@
+@import "std"
+
+fn main() {
+    var xs = std.List<int>.new()
+    xs.push(1)
+    xs.push(2)
+    if xs.len() != 2 {
+        std.panic("list len")
+    }
+    std.log("tests ok")
+}

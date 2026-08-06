@@ -1,0 +1,14 @@
+---
+description: Convenções do compilador Steampunk em Rust
+globs: "**/*.{rs,toml}"
+alwaysApply: false
+---
+
+# Compilador Steampunk (Rust)
+
+- Pipeline: **lexer → parser → AST → resolve/imports → typecheck → MIR/IR → codegen** (+ runtime).
+- Gramática e keywords: `SPEC.md` §2 e §18. Não adicionar `let` nem manifesto TOML.
+- Runtime: scheduler M:N; `async`/`Future`; `spawn` = goroutine (`void`).
+- Deps: cache global `~/.steampunk/deps`; typecheck via `.stkmap`; no build, copiar `.stkb` para dentro do binário do app. Nunca pasta de deps no projeto; nunca exigir fonte da dep.
+- Erros: mensagens acionáveis (DX). Preferir testes de snapshot em fixtures `.stk`.
+- Antes de mudar semântica, consultar a skill `steampunk-compiler` e a seção da SPEC.

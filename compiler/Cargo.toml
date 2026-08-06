@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stk-span",
+    "crates/stk-ast",
+    "crates/stk-lexer",
+    "crates/stk-parser",
+    "crates/stk-types",
+    "crates/stk-codegen",
+    "crates/stk-cli",
+    "crates/stk-lsp",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+stk-span = { path = "crates/stk-span" }
+stk-ast = { path = "crates/stk-ast" }
+stk-lexer = { path = "crates/stk-lexer" }
+stk-parser = { path = "crates/stk-parser" }
+stk-types = { path = "crates/stk-types" }
+stk-codegen = { path = "crates/stk-codegen" }
+cranelift-codegen = "0.116"
+cranelift-frontend = "0.116"
+cranelift-jit = "0.116"
+cranelift-module = "0.116"
+cranelift-native = "0.116"
+cranelift-object = "0.116"
+target-lexicon = "0.12"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"

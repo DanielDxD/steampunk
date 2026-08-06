@@ -1,0 +1,14 @@
+@import "std"
+
+fn square(int x) int {
+    return x * x
+}
+
+fn main() {
+    var xs = std.List<int>.new()
+    xs.push(1)
+    xs.push(2)
+    xs.push(3)
+    var ys = std.parallel.map(xs, square)
+    std.log("len=$1 first=$2", ys.len(), ys.get(0))
+}

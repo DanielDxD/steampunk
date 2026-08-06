@@ -1,0 +1,29 @@
+@import "std"
+
+fn worker(int id, std.sync.Channel<int> out) {
+    out.send(id * 2)
+}
+
+fn main() {
+    var out = std.sync.Channel<int>.new()
+    var wg = std.sync.WaitGroup.new()
+
+    for i in 0..4 {
+        wg.add(1)
+        spawn {
+            worker(i, out)
+            wg.done()
+        }
+    }
+
+    spawn {
+        wg.wait()
+        out.close()
+    }
+
+    var sum = 0
+    for v in out {
+        sum = sum + v
+    }
+    std.log("sum=$1", sum)
+}

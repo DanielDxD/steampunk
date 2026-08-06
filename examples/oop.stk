@@ -1,0 +1,48 @@
+@import "std"
+
+class Named {
+    priv var _label string = ""
+
+    pub var label string {
+        get {
+            return self._label
+        }
+        set(string v) {
+            self._label = v
+        }
+    }
+
+    pub fn new(string label = "x") Named {
+        self.label = label
+        return self
+    }
+
+    pub fn drop() {
+        std.log("drop Named")
+    }
+}
+
+class Flyer {
+    pub var canFly bool = true
+
+    pub fn fly() {
+        std.log("flying")
+    }
+}
+
+class Bird :: Named, Flyer {
+    pub fn new(string label) Bird {
+        self.label = label
+        return self
+    }
+
+    pub fn speak() {
+        super.Flyer.fly()
+        std.log("bird=$1", self.label)
+    }
+}
+
+fn main() {
+    var b = new Bird("eagle")
+    b.speak()
+}

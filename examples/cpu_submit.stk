@@ -1,0 +1,11 @@
+@import "std"
+
+fn heavy() int {
+    std.sleep(30)
+    return 42
+}
+
+async fn main() {
+    var result = await std.cpu.submit(heavy)
+    std.log("cpu=$1", result)
+}

@@ -1,0 +1,11 @@
+@import "std"
+
+async fn title() string {
+    std.sleep(10)
+    return "Ada"
+}
+
+async fn main() {
+    var t = await title()
+    std.log("title=$1", t)
+}

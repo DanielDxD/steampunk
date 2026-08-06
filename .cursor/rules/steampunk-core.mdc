@@ -1,0 +1,24 @@
+---
+description: Steampunk language core — SPEC.md is the source of truth for syntax, semantics, and toolchain
+alwaysApply: true
+---
+
+# Steampunk — regras centrais
+
+- **Fonte da verdade:** `SPEC.md`. Não inventar sintaxe, keywords ou semântica que contradigam a SPEC.
+- Em conflito SPEC vs código, alinhar o código à SPEC — ou atualizar a SPEC primeiro com decisão explícita do usuário.
+- Compilador e toolchain em **Rust**. Linguagem do usuário: arquivos `.stk`; manifesto: `.stkm` (nunca TOML).
+- Objetivos: performance nativa + DX; OOP; async/`Future`; `spawn` estilo goroutine; deps pré-compiladas (`.stkb` + `.stkmap`) em cache **global**, incorporadas ao binário só no build.
+
+## Proibições frequentes
+
+- Não existe `let` — só `var` e `const`.
+- Manifesto não é `Cargo.toml` / `Steam.toml` — é `manager.stkm`.
+- `spawn` retorna `void` (não `Future`); sync via `Channel` / `WaitGroup`.
+- Membros de classe exigem `pub` | `priv` | `prot` (nunca omitir).
+
+## Ao implementar
+
+1. Ler a seção relevante de `SPEC.md` antes de mudar lexer/parser/types/runtime.
+2. Preferir o roadmap (§20): 0.1 frontend+async → 0.2 sync/parallel → 0.3 pacotes → 0.4 LSP.
+3. Usar as skills do projeto: `steampunk-compiler`, `steampunk-stk`, `steampunk-spec`.

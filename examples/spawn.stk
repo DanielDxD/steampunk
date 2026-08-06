@@ -1,0 +1,27 @@
+@import "std"
+
+fn main() {
+    std.log("main: launching workers")
+
+    spawn {
+        std.log("A: start")
+        std.sleep(200)
+        std.log("A: end")
+    }
+
+    spawn {
+        std.log("B: start")
+        std.sleep(500)
+        std.log("B: end")
+    }
+
+    spawn {
+        std.log("C: start")
+        std.sleep(50)
+        std.log("C: end")
+    }
+
+    // If spawn were sequential/blocking, this line would appear only after A/B/C finish.
+    // With real concurrency it prints while A and B are still sleeping.
+    std.log("main: still running (workers in parallel)")
+}

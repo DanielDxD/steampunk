@@ -1,0 +1,31 @@
+---
+description: Manifesto .stkm e modelo de dependências .stkb/.stkmap
+globs: "**/*.{stkm,stkmap}"
+alwaysApply: false
+---
+
+# Steampunk — manifesto e deps
+
+- Extensão: `.stkm` (não TOML). Exemplo canônico: `manager.stkm`.
+- Metadados: `chave = valor`.
+- Blocos: `scripts` + `.declare(...)`; `dependencies` + `.use("nome", version = "^x.y.z")`.
+
+```stkm
+name = "My App"
+version = "1.0.0"
+private = true
+
+scripts
+    .declare("build", "steampunk build main.stk --out build/app")
+
+dependencies
+    .use("dep1", version = "^1.0.1")
+```
+
+## Artefatos e cache global
+
+- `.stkb` — binário da lib; `.stkmap` — sourcemap (typecheck/LSP).
+- Cache **global** (não no projeto): `~/.steampunk/deps/<nome>/<versão>/` (ou `$STEAMPUNK_HOME/deps/`).
+- Mesma versão → um artefato reutilizado por todos os projetos da máquina.
+- Em tempo de compilação, o `.stkb` é **copiado/incorporado** ao binário da aplicação; não fica pasta de deps no repo.
+- Build **não** recompila fontes das deps.

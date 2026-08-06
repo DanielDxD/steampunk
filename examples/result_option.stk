@@ -1,0 +1,28 @@
+@import "std"
+
+fn parsePositive(int n) std.Result<int, string> {
+    if n > 0 {
+        return std.Result<int, string>.ok(n)
+    }
+    return std.Result<int, string>.err("non-positive")
+}
+
+fn main() {
+    match parsePositive(7) {
+        ok(n) => { std.log("ok=$1", n) }
+        err(e) => { std.log("err=$1", e) }
+    }
+    match parsePositive(0) {
+        ok(n) => { std.log("bad=$1", n) }
+        err(e) => { std.log("fail=$1", e) }
+    }
+    var maybe = std.Option<int>.some(3)
+    match maybe {
+        some(v) => { std.log("some=$1", v) }
+        none => { std.log("none") }
+    }
+    match std.Option<int>.none() {
+        some(v) => { std.log("x=$1", v) }
+        none => { std.log("empty") }
+    }
+}

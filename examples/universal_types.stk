@@ -1,0 +1,69 @@
+@import "std"
+
+iclass Named {
+    getName() string
+}
+
+pub class Person : Named {
+    priv var name string
+
+    pub fn new(string name) Person {
+        self.name = name
+        return self
+    }
+
+    pub fn getName() string {
+        return self.name
+    }
+}
+
+fn identity<T>(T x) T {
+    return x
+}
+
+fn holdNamed(Named _n) {
+}
+
+async fn main() {
+    var p = new Person("Ada")
+    holdNamed(p)
+
+    var list = std.List<Person>.new()
+    list.push(p)
+    var again = list.get(0)
+    std.log("$1", again.getName())
+
+    var fut = Future.ready(p)
+    var awaited = await fut
+    std.log("future=$1", awaited.getName())
+
+    var opt = std.Option<Person>.some(p)
+    match opt {
+        some(x) => { std.log("opt=$1", x.getName()) }
+        none => { std.log("none") }
+    }
+
+    var res = std.Result<Person, string>.ok(p)
+    match res {
+        ok(x) => { std.log("res=$1", x.getName()) }
+        err(e) => { std.log("$1", e) }
+    }
+
+    var n = identity(42)
+    std.log("id=$1", n)
+    var s = identity("hi")
+    std.log("$1", s)
+    var p2 = identity(p)
+    std.log("idp=$1", p2.getName())
+
+    var ch = std.sync.Channel<Person>.new()
+    ch.send(p)
+    var fromCh = await ch.recv()
+    std.log("ch=$1", fromCh.getName())
+
+    var mu = std.sync.Mutex<Person>.new(p)
+    mu.lock()
+    var fromMu = mu.get()
+    mu.unlock()
+    std.log("mu=$1", fromMu.getName())
+}

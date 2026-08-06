@@ -1,0 +1,18 @@
+[package]
+name = "stk-codegen"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+stk-span.workspace = true
+stk-ast.workspace = true
+stk-types.workspace = true
+cranelift-codegen = { workspace = true, features = ["host-arch"] }
+cranelift-frontend.workspace = true
+cranelift-jit.workspace = true
+cranelift-module.workspace = true
+cranelift-native.workspace = true
+cranelift-object.workspace = true
+target-lexicon.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true

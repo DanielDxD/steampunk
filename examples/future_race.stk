@@ -1,0 +1,16 @@
+@import "std"
+
+async fn slow() int {
+    std.sleep(200)
+    return 1
+}
+
+async fn fast() int {
+    std.sleep(50)
+    return 2
+}
+
+async fn main() {
+    var winner = await Future.race(slow(), fast())
+    std.log("winner=$1", winner)
+}

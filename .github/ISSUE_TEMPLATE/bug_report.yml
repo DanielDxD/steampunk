@@ -1,0 +1,44 @@
+name: Bug report
+description: Report incorrect compiler, runtime, or language behavior
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. For security issues, see [SECURITY.md](../SECURITY.md) instead.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal `.stk` snippet and commands if possible
+      render: stk
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include compiler output / panic / wrong result
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Environment
+      description: OS, Rust version (`rustc -V`), Steampunk commit or version
+    validations:
+      required: true

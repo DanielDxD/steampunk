@@ -1,0 +1,20 @@
+@import "std"
+
+fn main() {
+    var ch = std.sync.Channel<string>.new()
+    var wg = std.sync.WaitGroup.new()
+    wg.add(1)
+    spawn {
+        ch.send("hello")
+        ch.send("world")
+        wg.done()
+    }
+    spawn {
+        wg.wait()
+        ch.close()
+    }
+    for s in ch {
+        std.log("got=$1", s)
+    }
+    std.log("done")
+}

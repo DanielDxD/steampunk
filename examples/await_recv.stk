@@ -1,0 +1,13 @@
+@import "std"
+
+async fn main() {
+    var ch = std.sync.Channel<int>.new()
+
+    spawn {
+        ch.send(42)
+        ch.close()
+    }
+
+    var v = await ch.recv()
+    std.log("got=$1", v)
+}

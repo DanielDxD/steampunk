@@ -1,0 +1,25 @@
+@import "std"
+
+fn main() {
+    var ch = std.sync.Channel<int>.buffered(1)
+
+    spawn {
+        std.log("P: send 1")
+        ch.send(1)
+        std.log("P: send 2 (may wait for slot)")
+        ch.send(2)
+        std.log("P: sent 2")
+        ch.close()
+    }
+
+    std.sleep(80)
+    std.log("C: recv first")
+    var a = ch.recv()
+    std.log("C: got $1", a)
+    std.sleep(80)
+    std.log("C: draining")
+    for v in ch {
+        std.log("C: got $1", v)
+    }
+    std.log("done")
+}

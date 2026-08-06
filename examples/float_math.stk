@@ -1,0 +1,26 @@
+@import "std"
+
+fn area(float w, float h) float {
+    return w * h
+}
+
+fn main() {
+    var w = 2.5
+    var h = 4.0
+
+    std.log("area=$1", area(w, h))
+    std.log("soma=$1", w + h)
+    std.log("dif=$1", h - w)
+    std.log("div=$1", h / w)
+
+    var metade = w / 2.0
+    std.log("metade=$1", metade)
+    std.log("negativo=$1", -metade)
+
+    if w < h {
+        std.log("w menor que h")
+    }
+    if area(w, h) == 10.0 {
+        std.log("area exata")
+    }
+}

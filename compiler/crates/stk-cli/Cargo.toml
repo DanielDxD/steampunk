@@ -1,0 +1,18 @@
+[package]
+name = "stk-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "steampunk"
+path = "src/main.rs"
+
+[dependencies]
+stk-span.workspace = true
+stk-ast.workspace = true
+stk-lexer.workspace = true
+stk-parser.workspace = true
+stk-types.workspace = true
+stk-codegen.workspace = true
+clap.workspace = true
+anyhow.workspace = true

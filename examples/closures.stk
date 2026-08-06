@@ -1,0 +1,22 @@
+@import "std"
+
+fn heavy() int {
+    return 7
+}
+
+async fn main() {
+    var base = 40
+    var f = fn() int { return base + 2 }
+    var r = await std.cpu.submit(f)
+    std.log("stored=$1", r)
+
+    var r2 = await std.cpu.submit(fn() int { return 41 + 1 })
+    std.log("inline=$1", r2)
+
+    var g = fn(int n) int { return n + base }
+    var local = g(2)
+    std.log("call=$1", local)
+
+    var named = await std.cpu.submit(heavy)
+    std.log("named=$1", named)
+}

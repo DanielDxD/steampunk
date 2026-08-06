@@ -1,0 +1,9 @@
+@import "std"
+
+pub fn add(int a, int b) int {
+    return a + b
+}
+
+fn hidden() int {
+    return 0
+}

@@ -1,0 +1,17 @@
+@import "std"
+
+struct Point {
+    pub var x int
+    pub var y int
+
+    pub fn new(int x, int y) Point {
+        self.x = x
+        self.y = y
+        return self
+    }
+}
+
+fn main() {
+    var p = new Point(3, 4)
+    std.log("point=$1,$2", p.x, p.y)
+}

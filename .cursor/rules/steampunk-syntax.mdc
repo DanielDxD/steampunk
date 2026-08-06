@@ -1,0 +1,41 @@
+---
+description: Sintaxe e idioma Steampunk ao editar arquivos .stk
+globs: "**/*.stk"
+alwaysApply: false
+---
+
+# Steampunk — arquivos `.stk`
+
+Seguir `SPEC.md`. Atalhos:
+
+```stk
+@import "std"
+@import ":module"
+
+fn main() { std.log("Hi $1", name) }
+
+pub class Foo {
+    priv var x int = 0
+    pub var name string {
+        get { return "foo" }
+        set(string v) { }
+    }
+    pub fn new(int x = 0) Foo { self.x = x; return self }
+    pub fn drop() { }
+}
+
+class Flyer { pub fn new() Flyer { return self } }
+class Mix :: Foo, Flyer {}
+iclass INamed { getName(string n) }
+class Person : INamed {
+    pub fn getName(string n) { std.log(n) }
+}
+
+async fn load() string { return await std.http.get("/") }
+spawn { ch.send(1) }   // void — não await spawn
+```
+
+- Params: `tipo nome` — retorno após `)`.
+- Herança `::` · interface `:` · `iclass` sem `fn` no corpo.
+- Formatação: `$1`, `$2` em `std.log`.
+- Sem `let`. Membros: `pub`/`priv`/`prot` obrigatórios.

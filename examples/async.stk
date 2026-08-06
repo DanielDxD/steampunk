@@ -1,0 +1,19 @@
+@import "std"
+
+async fn answer() int {
+    return 42
+}
+
+async fn compute() int {
+    var x = await answer()
+    return x + 1
+}
+
+async fn main() {
+    spawn {
+        std.log("spawned")
+    }
+    var f = compute()
+    var v = await f
+    std.log("v=$1", v)
+}

@@ -1,0 +1,18 @@
+@import "std"
+
+async fn left() int {
+    return 10
+}
+
+async fn right() int {
+    return 32
+}
+
+async fn main() {
+    var ready = Future.ready(100)
+    var r = await ready
+    std.log("ready=$1", r)
+
+    var pair = await Future.join(left(), right())
+    std.log("join=$1+$2=$3", pair[0], pair[1], pair[0] + pair[1])
+}

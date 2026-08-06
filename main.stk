@@ -1,0 +1,30 @@
+@import "std"
+
+class Person {
+    pub var name string
+    pub var age int
+
+    pub fn new(string name, int age) Person {
+        self.name = name
+        self.age = age
+        return self
+    }
+
+    pub fn sayHello() {
+        std.log("Hello, my name is $1 and I am $2 years old", self.name, self.age)
+    }
+}
+
+fn isAdult(Person person) bool {
+    return person.age >= 18
+}
+
+fn main() {
+    var person = new Person("John", 12)
+
+    if isAdult(person) {
+        std.log("John is an adult")
+    } else {
+        std.log("John is not an adult")
+    }
+}

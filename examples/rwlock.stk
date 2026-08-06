@@ -1,0 +1,15 @@
+@import "std"
+
+fn main() {
+    var lock = std.sync.RwLock<int>.new(10)
+    lock.readLock()
+    var v = lock.get()
+    lock.readUnlock()
+    std.log("read=$1", v)
+    lock.writeLock()
+    lock.set(v + 1)
+    lock.writeUnlock()
+    lock.readLock()
+    std.log("after=$1", lock.get())
+    lock.readUnlock()
+}

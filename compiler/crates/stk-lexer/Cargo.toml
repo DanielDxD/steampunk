@@ -1,0 +1,8 @@
+[package]
+name = "stk-lexer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+stk-span.workspace = true
+thiserror.workspace = true

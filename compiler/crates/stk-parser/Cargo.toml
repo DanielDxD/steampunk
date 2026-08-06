@@ -1,0 +1,10 @@
+[package]
+name = "stk-parser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+stk-span.workspace = true
+stk-ast.workspace = true
+stk-lexer.workspace = true
+thiserror.workspace = true

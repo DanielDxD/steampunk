@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose a language, compiler, or tooling improvement
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Prefer aligning with the roadmap in `SPEC.md` §20. Language-syntax changes need a SPEC update.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to achieve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Suggested API, syntax, or behavior (with examples if possible)
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Language / SPEC
+        - Compiler / runtime
+        - Stdlib
+        - CLI / package manager
+        - LSP / tooling
+        - Docs / examples
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional

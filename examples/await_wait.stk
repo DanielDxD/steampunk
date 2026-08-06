@@ -1,0 +1,12 @@
+@import "std"
+
+async fn main() {
+    var wg = std.sync.WaitGroup.new()
+    wg.add(1)
+    spawn {
+        std.sleep(40)
+        wg.done()
+    }
+    await wg.wait()
+    std.log("waited")
+}

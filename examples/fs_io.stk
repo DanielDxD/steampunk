@@ -1,0 +1,27 @@
+@import "std"
+
+fn main() {
+    var path = "/tmp/steampunk_fs_io.txt"
+    match std.env.get("STK_FS_PATH") {
+        some(p) => { path = p }
+        none => { std.log("usando caminho padrao") }
+    }
+
+    match std.fs.writeString(path, "engrenagens a vapor") {
+        ok(n) => { std.log("escrito em $1", path) }
+        err(e) => { std.log("erro de escrita=$1", e) }
+    }
+
+    match std.fs.readToString(path) {
+        ok(texto) => {
+            std.log("lido=$1", texto)
+            std.log("bytes=$1", std.string.len(texto))
+        }
+        err(e) => { std.log("erro de leitura=$1", e) }
+    }
+
+    match std.fs.readToString("/tmp/steampunk_nao_existe_9137.txt") {
+        ok(texto) => { std.log("inesperado=$1", texto) }
+        err(e) => { std.log("leitura falhou como esperado") }
+    }
+}

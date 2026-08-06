@@ -1,0 +1,19 @@
+@import "std"
+
+fn main() {
+    var mu = std.sync.Mutex<int>.new(0)
+    var wg = std.sync.WaitGroup.new()
+
+    for i in 0..4 {
+        wg.add(1)
+        spawn {
+            mu.lock()
+            mu.set(mu.get() + 1)
+            mu.unlock()
+            wg.done()
+        }
+    }
+
+    wg.wait()
+    std.log("total=$1", mu.get())
+}

@@ -1,0 +1,9 @@
+@import "std"
+
+fn main() {
+    // Offline-friendly: invalid host → err arm
+    match std.http.get("http://127.0.0.1:1/") {
+        ok(body) => { std.log("unexpected ok len=$1", std.string.len(body)) }
+        err(e) => { std.log("http err ok") }
+    }
+}

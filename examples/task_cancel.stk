@@ -1,0 +1,14 @@
+@import "std"
+
+fn main() {
+    var tok = std.task.CancellationToken.new()
+    std.task.yield()
+    if tok.isCancelled() {
+        std.panic("should not be cancelled")
+    }
+    tok.cancel()
+    if !tok.isCancelled() {
+        std.panic("should be cancelled")
+    }
+    std.log("task ok")
+}

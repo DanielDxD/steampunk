@@ -1,0 +1,12 @@
+name = "My App"
+version = "1.0.0"
+private = true
+description = "My Application manifest"
+
+scripts
+    .declare("start", "cargo run -p stk-cli --manifest-path compiler/Cargo.toml -- run main.stk")
+    .declare("build", "cargo run -p stk-cli --manifest-path compiler/Cargo.toml -- build main.stk --out build/app")
+
+dependencies
+    .use("dep1", version = "^1.0.1")
+    .use("dep2", version = "^2.4.3")

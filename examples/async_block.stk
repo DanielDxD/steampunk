@@ -1,0 +1,23 @@
+@import "std"
+
+async fn main() {
+    var n = 3
+    var f = async {
+        std.sleep(20)
+        return n + 4
+    }
+    var v = await f
+    std.log("block=$1", v)
+
+    var winner = await Future.race(
+        async {
+            std.sleep(80)
+            return 1
+        },
+        async {
+            std.sleep(10)
+            return 2
+        }
+    )
+    std.log("winner=$1", winner)
+}

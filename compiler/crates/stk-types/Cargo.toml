@@ -1,0 +1,9 @@
+[package]
+name = "stk-types"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+stk-span.workspace = true
+stk-ast.workspace = true
+thiserror.workspace = true

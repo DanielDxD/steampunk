@@ -1,0 +1,25 @@
+@import "std"
+
+fn main() {
+    var args = std.env.args()
+    if args.len() > 0 {
+        std.log("programa=$1", args.get(0))
+    }
+    std.log("argc=$1", args.len())
+
+    std.env.set("STK_DEMO", "engrenagem")
+    match std.env.get("STK_DEMO") {
+        some(v) => { std.log("STK_DEMO=$1", v) }
+        none => { std.log("STK_DEMO ausente") }
+    }
+    match std.env.get("STK_NAO_DEFINIDA_9137") {
+        some(v) => { std.log("inesperado=$1", v) }
+        none => { std.log("STK_NAO_DEFINIDA_9137 ausente") }
+    }
+
+    if std.time.nowMs() > 0 {
+        std.log("relogio ok")
+    }
+
+    std.process.exit(0)
+}

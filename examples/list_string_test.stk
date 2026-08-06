@@ -1,0 +1,38 @@
+@import "std"
+
+fn main() {
+    var nomes = std.List<string>.new()
+    nomes.push("ada")
+    nomes.push("grace")
+    std.log("total=$1", nomes.len())
+    std.log("primeiro=$1", nomes.get(0))
+
+    var quadrados = std.List<int>.new()
+    var i = 0
+    while i < 3 {
+        quadrados.push(i * i)
+        i = i + 1
+    }
+    quadrados.set(0, 42)
+    std.log("q0=$1 q2=$2", quadrados.get(0), quadrados.get(2))
+
+    var saudacao = std.string.concat("ola, ", nomes.get(1))
+    std.log("saudacao=$1", saudacao)
+    std.log("len=$1", std.string.len(saudacao))
+    std.log("slice=$1", std.string.slice(saudacao, 5, 10))
+
+    if std.string.contains(saudacao, "grace") {
+        std.log("contem grace")
+    }
+
+    std.log("fromInt=$1", std.string.fromInt(7))
+
+    match std.string.parseInt("123") {
+        ok(n) => { std.log("parse=$1", n) }
+        err(e) => { std.log("erro=$1", e) }
+    }
+    match std.string.parseInt("abc") {
+        ok(n) => { std.log("inesperado=$1", n) }
+        err(e) => { std.log("erro=$1", e) }
+    }
+}

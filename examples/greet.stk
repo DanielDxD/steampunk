@@ -1,0 +1,10 @@
+@import "std"
+
+fn sayMyName(string name) {
+    std.log("Hello, $1", name)
+}
+
+fn main() {
+    sayMyName("Daniel")
+    sayMyName("John")
+}

@@ -1,0 +1,34 @@
+@import "std"
+
+fn factorial(int n) int {
+    var acc = 1
+    var i = 1
+    while i <= n {
+        acc = acc * i
+        i = i + 1
+    }
+    return acc
+}
+
+fn describe(int n) {
+    match n {
+        0 => { std.log("zero") }
+        1 => { std.log("um") }
+        _ => { std.log("outro") }
+    }
+}
+
+fn main() {
+    if factorial(5) == 120 {
+        std.log("ok")
+    } else {
+        std.log("fail")
+    }
+
+    for i in 0..3 {
+        std.log("i=$1", i)
+    }
+
+    describe(1)
+    describe(9)
+}
