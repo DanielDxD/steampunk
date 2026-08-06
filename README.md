@@ -18,9 +18,51 @@ The compiler is written in **Rust** and targets native code via Cranelift (`run`
 
 ## Requirements
 
-- Rust (stable) and Cargo
-- A C linker (`cc`, `clang`, or `gcc`) for `build`
-- macOS or Linux (current development targets)
+- **To develop / compile the toolchain:** Rust (stable) + Cargo, and a C linker for local `steampunk build`
+- **To use a Release binary:** nothing else — download `steampunk` for your OS (see [Releases](#releases))
+
+## Releases
+
+GitHub Actions builds **standalone** CLI binaries when you push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+That runs [`.github/workflows/release.yml`](.github/workflows/release.yml) and publishes a [GitHub Release](https://github.com/OWNER/REPO/releases) with:
+
+| Target | Notes |
+|--------|--------|
+| `x86_64-unknown-linux-musl` | Fully static Linux x86_64 |
+| `aarch64-unknown-linux-musl` | Fully static Linux ARM64 |
+| `x86_64-apple-darwin` | macOS Intel |
+| `aarch64-apple-darwin` | macOS Apple Silicon |
+| `x86_64-pc-windows-msvc` | Windows (CRT linked statically) |
+
+After download:
+
+```bash
+# Linux / macOS
+tar -xzf steampunk-v0.1.0-*.tar.gz
+sudo mv steampunk-v0.1.0-*/steampunk /usr/local/bin/
+steampunk run examples/hello.stk
+
+# Windows (PowerShell)
+Expand-Archive steampunk-v0.1.0-x86_64-pc-windows-msvc.zip
+# put steampunk.exe on PATH, then:
+steampunk.exe run examples\hello.stk
+```
+
+Build locally (one platform) without CI:
+
+```bash
+cargo build --release -p stk-cli --manifest-path compiler/Cargo.toml
+# → compiler/target/release/steampunk
+```
+
+**Dependency note:** the *CLI* needs no Rust/Cargo on the user’s machine.  
+`steampunk run` (JIT) is self-contained. `steampunk build` (AOT) still invokes a system C linker (`cc` / `clang` / `gcc` / MSVC) on that machine to finish the native binary — that is a toolchain limitation of AOT today, not of packaging.
 
 ## Quick start
 
