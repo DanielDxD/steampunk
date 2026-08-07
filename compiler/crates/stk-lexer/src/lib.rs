@@ -24,6 +24,9 @@ pub enum TokenKind {
     Break,
     Continue,
     Match,
+    Do,
+    Try,
+    Catch,
     True,
     False,
     Class,
@@ -64,6 +67,7 @@ pub enum TokenKind {
     AndAnd,
     OrOr,
     Bang,
+    Question,
     Plus,
     Minus,
     Star,
@@ -141,6 +145,7 @@ impl<'a> Lexer<'a> {
                     self.simple(TokenKind::Bang, start)
                 }
             }
+            b'?' => self.simple(TokenKind::Question, start),
             b'=' => {
                 if self.peek_byte(1) == Some(b'=') {
                     self.pos += 2;
@@ -416,6 +421,9 @@ impl<'a> Lexer<'a> {
             "break" => TokenKind::Break,
             "continue" => TokenKind::Continue,
             "match" => TokenKind::Match,
+            "do" => TokenKind::Do,
+            "try" => TokenKind::Try,
+            "catch" => TokenKind::Catch,
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "class" => TokenKind::Class,

@@ -1,3 +1,4 @@
+mod http_rt;
 mod runtime;
 mod serde_rt;
 
@@ -18,7 +19,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
-use stk_ast::{BinOp, UnOp};
+use stk_ast::{BinOp, HttpClientMethod, HttpResponseKind, TryMode, UnOp};
 use stk_types::{
     CheckedAssignTarget, CheckedExpr, CheckedFunction, CheckedMethod, CheckedPattern,
     CheckedProgram, CheckedStmt, Ty,
@@ -30,7 +31,7 @@ pub use runtime::{
     stk_channel_recv_future, stk_channel_recv_ok, stk_channel_send, stk_env_args, stk_env_get,
     stk_env_set, stk_fs_read_to_string, stk_fs_write_string, stk_future_await,
     stk_future_complete, stk_future_join, stk_future_new, stk_future_race, stk_future_ready,
-    stk_http_get, stk_list_get, stk_list_len, stk_list_new, stk_list_push, stk_list_set,
+    stk_list_get, stk_list_len, stk_list_new, stk_list_push, stk_list_set,
     stk_mutex_get, stk_mutex_lock, stk_mutex_new, stk_mutex_set, stk_mutex_unlock, stk_panic,
     stk_parallel_map_int, stk_process_exit, stk_rwlock_get, stk_rwlock_new, stk_rwlock_read_lock,
     stk_rwlock_read_unlock, stk_rwlock_set, stk_rwlock_write_lock, stk_rwlock_write_unlock,
@@ -40,6 +41,14 @@ pub use runtime::{
     stk_waitgroup_new, stk_waitgroup_wait, stk_waitgroup_wait_future,
 };
 pub use serde_rt::{stk_serde_decode, stk_serde_encode};
+pub use http_rt::{
+    stk_http_client, stk_http_get, stk_http_headers_get, stk_http_headers_new, stk_http_headers_set,
+    stk_http_request_body, stk_http_request_header, stk_http_request_method, stk_http_request_param,
+    stk_http_request_path, stk_http_request_query, stk_http_response_body, stk_http_response_empty,
+    stk_http_response_header, stk_http_response_json, stk_http_response_set_header,
+    stk_http_response_status, stk_http_response_text, stk_http_server_listen, stk_http_server_new,
+    stk_http_server_route,
+};
 
 fn async_wrap_name(fn_name: &str) -> String {
     format!("__async_wrap_{fn_name}")
@@ -117,7 +126,11 @@ fn clif_ty(ty: &Ty) -> types::Type {
         | Ty::Result { .. }
         | Ty::Option { .. }
         | Ty::List { .. }
-        | Ty::Fn { .. } => types::I64,
+        | Ty::Fn { .. }
+        | Ty::HttpRequest
+        | Ty::HttpResponse
+        | Ty::HttpHeaders
+        | Ty::HttpServer => types::I64,
         Ty::Void => types::I64,
     }
 }
@@ -150,6 +163,17 @@ fn binary_i64_signature(ret: bool) -> Signature {
     let mut sig = Signature::new(CallConv::SystemV);
     sig.params.push(AbiParam::new(types::I64));
     sig.params.push(AbiParam::new(types::I64));
+    if ret {
+        sig.returns.push(AbiParam::new(types::I64));
+    }
+    sig
+}
+
+fn quaternary_i64_signature(ret: bool) -> Signature {
+    let mut sig = Signature::new(CallConv::SystemV);
+    for _ in 0..4 {
+        sig.params.push(AbiParam::new(types::I64));
+    }
     if ret {
         sig.returns.push(AbiParam::new(types::I64));
     }
@@ -212,7 +236,26 @@ struct EmitCtx<'a, M: Module> {
     rwlock_get_id: FuncId,
     rwlock_set_id: FuncId,
     parallel_map_int_id: FuncId,
-    http_get_id: FuncId,
+    http_client_id: FuncId,
+    http_headers_new_id: FuncId,
+    http_headers_set_id: FuncId,
+    http_headers_get_id: FuncId,
+    http_response_text_id: FuncId,
+    http_response_json_id: FuncId,
+    http_response_empty_id: FuncId,
+    http_response_status_id: FuncId,
+    http_response_body_id: FuncId,
+    http_response_set_header_id: FuncId,
+    http_response_header_id: FuncId,
+    http_request_method_id: FuncId,
+    http_request_path_id: FuncId,
+    http_request_body_id: FuncId,
+    http_request_query_id: FuncId,
+    http_request_header_id: FuncId,
+    http_request_param_id: FuncId,
+    http_server_new_id: FuncId,
+    http_server_route_id: FuncId,
+    http_server_listen_id: FuncId,
     task_yield_id: FuncId,
     cancel_token_new_id: FuncId,
     cancel_token_cancel_id: FuncId,
@@ -245,6 +288,8 @@ struct EmitCtx<'a, M: Module> {
     loops: Vec<LoopTargets>,
     /// When set, `return v` completes this future handle instead of returning a value.
     async_complete_handle: Option<Variable>,
+    /// Stack of `do` catch blocks (each has one i64 param = err payload).
+    do_catches: Vec<Block>,
 }
 
 fn collect_string_lits(program: &CheckedProgram) -> Vec<Vec<u8>> {
@@ -258,8 +303,24 @@ fn collect_string_lits(program: &CheckedProgram) -> Vec<Vec<u8>> {
                     out.push(b);
                 }
             }
+            CheckedExpr::Try {
+                mode: TryMode::Force,
+                err_ty,
+                ..
+            } if *err_ty != Ty::String => {
+                let b = b"try! failed".to_vec();
+                if seen.insert(b.clone(), ()).is_none() {
+                    out.push(b);
+                }
+            }
             CheckedExpr::SerdeEncode { schema, .. } | CheckedExpr::SerdeDecode { schema, .. } => {
                 let b = schema.as_bytes().to_vec();
+                if seen.insert(b.clone(), ()).is_none() {
+                    out.push(b);
+                }
+            }
+            CheckedExpr::HttpServerRoute { method, .. } => {
+                let b = method.as_bytes().to_vec();
                 if seen.insert(b.clone(), ()).is_none() {
                     out.push(b);
                 }
@@ -349,6 +410,18 @@ fn walk_stmt(stmt: &CheckedStmt, f: &mut impl FnMut(&CheckedExpr)) {
                 }
             }
         }
+        CheckedStmt::DoCatch {
+            body,
+            catch_body,
+            ..
+        } => {
+            for s in body {
+                walk_stmt(s, f);
+            }
+            for s in catch_body {
+                walk_stmt(s, f);
+            }
+        }
         CheckedStmt::Break | CheckedStmt::Continue => {}
     }
 }
@@ -365,6 +438,7 @@ fn expr_is_float(expr: &CheckedExpr) -> bool {
         | CheckedExpr::MethodCall { ret: ty, .. }
         | CheckedExpr::CallClosure { ret: ty, .. }
         | CheckedExpr::Await { inner: ty, .. }
+        | CheckedExpr::Try { ok_ty: ty, .. }
         | CheckedExpr::Index { elem: ty, .. }
         | CheckedExpr::ListGet { elem: ty, .. } => *ty == Ty::Float,
         _ => false,
@@ -388,7 +462,9 @@ fn walk_expr(expr: &CheckedExpr, f: &mut impl FnMut(&CheckedExpr)) {
             }
         }
         CheckedExpr::StdSleep { ms } => walk_expr(ms, f),
-        CheckedExpr::FieldGet { object, .. } | CheckedExpr::Await { expr: object, .. } => {
+        CheckedExpr::FieldGet { object, .. }
+        | CheckedExpr::Await { expr: object, .. }
+        | CheckedExpr::Try { expr: object, .. } => {
             walk_expr(object, f)
         }
         CheckedExpr::Index { array, index, .. } => {
@@ -452,7 +528,84 @@ fn walk_expr(expr: &CheckedExpr, f: &mut impl FnMut(&CheckedExpr)) {
             walk_expr(value, f);
         }
         CheckedExpr::ParallelMap { list, .. } => walk_expr(list, f),
-        CheckedExpr::HttpGet { url } => walk_expr(url, f),
+        CheckedExpr::HttpClient {
+            url,
+            body,
+            headers,
+            ..
+        } => {
+            walk_expr(url, f);
+            if let Some(b) = body {
+                walk_expr(b, f);
+            }
+            if let Some(h) = headers {
+                walk_expr(h, f);
+            }
+        }
+        CheckedExpr::HttpHeadersNew | CheckedExpr::HttpServerNew => {}
+        CheckedExpr::HttpHeadersSet {
+            headers,
+            key,
+            value,
+        } => {
+            walk_expr(headers, f);
+            walk_expr(key, f);
+            walk_expr(value, f);
+        }
+        CheckedExpr::HttpHeadersGet { headers, key }
+        | CheckedExpr::HttpResponseHeader {
+            response: headers,
+            key,
+        }
+        | CheckedExpr::HttpRequestQuery {
+            request: headers,
+            name: key,
+        }
+        | CheckedExpr::HttpRequestHeader {
+            request: headers,
+            name: key,
+        }
+        | CheckedExpr::HttpRequestParam {
+            request: headers,
+            name: key,
+        } => {
+            walk_expr(headers, f);
+            walk_expr(key, f);
+        }
+        CheckedExpr::HttpResponseNew { status, body, .. } => {
+            walk_expr(status, f);
+            if let Some(b) = body {
+                walk_expr(b, f);
+            }
+        }
+        CheckedExpr::HttpResponseStatus { response }
+        | CheckedExpr::HttpResponseBody { response }
+        | CheckedExpr::HttpRequestMethod { request: response }
+        | CheckedExpr::HttpRequestPath { request: response }
+        | CheckedExpr::HttpRequestBody { request: response } => walk_expr(response, f),
+        CheckedExpr::HttpResponseSetHeader {
+            response,
+            key,
+            value,
+        } => {
+            walk_expr(response, f);
+            walk_expr(key, f);
+            walk_expr(value, f);
+        }
+        CheckedExpr::HttpServerRoute {
+            server,
+            path,
+            handler,
+            ..
+        } => {
+            walk_expr(server, f);
+            walk_expr(path, f);
+            walk_expr(handler, f);
+        }
+        CheckedExpr::HttpServerListen { server, port } => {
+            walk_expr(server, f);
+            walk_expr(port, f);
+        }
         CheckedExpr::SerdeEncode { value, .. } => walk_expr(value, f),
         CheckedExpr::SerdeDecode { text, .. } => walk_expr(text, f),
         CheckedExpr::CancelTokenCancel { token }
@@ -656,6 +809,14 @@ fn collect_spawn_bodies(program: &CheckedProgram) -> Vec<SpawnThunk> {
                         walk(b, map);
                     }
                 }
+                CheckedStmt::DoCatch {
+                    body,
+                    catch_body,
+                    ..
+                } => {
+                    walk(body, map);
+                    walk(catch_body, map);
+                }
                 CheckedStmt::VarDecl { init, .. } => walk_expr_spawns(init, map),
                 CheckedStmt::Assign { value, .. } => walk_expr_spawns(value, map),
                 CheckedStmt::Return { value } => {
@@ -837,6 +998,29 @@ pub fn jit_run(program: &CheckedProgram) -> Result<()> {
     jit_builder.symbol("stk_rwlock_get", stk_rwlock_get as *const u8);
     jit_builder.symbol("stk_rwlock_set", stk_rwlock_set as *const u8);
     jit_builder.symbol("stk_parallel_map_int", stk_parallel_map_int as *const u8);
+    jit_builder.symbol("stk_http_client", stk_http_client as *const u8);
+    jit_builder.symbol("stk_http_headers_new", stk_http_headers_new as *const u8);
+    jit_builder.symbol("stk_http_headers_set", stk_http_headers_set as *const u8);
+    jit_builder.symbol("stk_http_headers_get", stk_http_headers_get as *const u8);
+    jit_builder.symbol("stk_http_response_text", stk_http_response_text as *const u8);
+    jit_builder.symbol("stk_http_response_json", stk_http_response_json as *const u8);
+    jit_builder.symbol("stk_http_response_empty", stk_http_response_empty as *const u8);
+    jit_builder.symbol("stk_http_response_status", stk_http_response_status as *const u8);
+    jit_builder.symbol("stk_http_response_body", stk_http_response_body as *const u8);
+    jit_builder.symbol(
+        "stk_http_response_set_header",
+        stk_http_response_set_header as *const u8,
+    );
+    jit_builder.symbol("stk_http_response_header", stk_http_response_header as *const u8);
+    jit_builder.symbol("stk_http_request_method", stk_http_request_method as *const u8);
+    jit_builder.symbol("stk_http_request_path", stk_http_request_path as *const u8);
+    jit_builder.symbol("stk_http_request_body", stk_http_request_body as *const u8);
+    jit_builder.symbol("stk_http_request_query", stk_http_request_query as *const u8);
+    jit_builder.symbol("stk_http_request_header", stk_http_request_header as *const u8);
+    jit_builder.symbol("stk_http_request_param", stk_http_request_param as *const u8);
+    jit_builder.symbol("stk_http_server_new", stk_http_server_new as *const u8);
+    jit_builder.symbol("stk_http_server_route", stk_http_server_route as *const u8);
+    jit_builder.symbol("stk_http_server_listen", stk_http_server_listen as *const u8);
     jit_builder.symbol("stk_http_get", stk_http_get as *const u8);
     jit_builder.symbol("stk_task_yield", stk_task_yield as *const u8);
     jit_builder.symbol("stk_cancel_token_new", stk_cancel_token_new as *const u8);
@@ -1015,7 +1199,26 @@ struct RuntimeIds {
     rwlock_get_id: FuncId,
     rwlock_set_id: FuncId,
     parallel_map_int_id: FuncId,
-    http_get_id: FuncId,
+    http_client_id: FuncId,
+    http_headers_new_id: FuncId,
+    http_headers_set_id: FuncId,
+    http_headers_get_id: FuncId,
+    http_response_text_id: FuncId,
+    http_response_json_id: FuncId,
+    http_response_empty_id: FuncId,
+    http_response_status_id: FuncId,
+    http_response_body_id: FuncId,
+    http_response_set_header_id: FuncId,
+    http_response_header_id: FuncId,
+    http_request_method_id: FuncId,
+    http_request_path_id: FuncId,
+    http_request_body_id: FuncId,
+    http_request_query_id: FuncId,
+    http_request_header_id: FuncId,
+    http_request_param_id: FuncId,
+    http_server_new_id: FuncId,
+    http_server_route_id: FuncId,
+    http_server_listen_id: FuncId,
     task_yield_id: FuncId,
     cancel_token_new_id: FuncId,
     cancel_token_cancel_id: FuncId,
@@ -1196,8 +1399,145 @@ fn declare_runtime<M: Module>(module: &mut M) -> Result<RuntimeIds> {
                 &binary_i64_signature(true),
             )
             .map_err(|e| anyhow!("{e}"))?,
-        http_get_id: module
-            .declare_function("stk_http_get", Linkage::Import, &unary_i64_signature(true))
+        http_client_id: module
+            .declare_function(
+                "stk_http_client",
+                Linkage::Import,
+                &quaternary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_headers_new_id: module
+            .declare_function(
+                "stk_http_headers_new",
+                Linkage::Import,
+                &void_ret_i64_signature(),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_headers_set_id: module
+            .declare_function(
+                "stk_http_headers_set",
+                Linkage::Import,
+                &ternary_i64_signature(false),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_headers_get_id: module
+            .declare_function(
+                "stk_http_headers_get",
+                Linkage::Import,
+                &binary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_response_text_id: module
+            .declare_function(
+                "stk_http_response_text",
+                Linkage::Import,
+                &binary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_response_json_id: module
+            .declare_function(
+                "stk_http_response_json",
+                Linkage::Import,
+                &binary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_response_empty_id: module
+            .declare_function(
+                "stk_http_response_empty",
+                Linkage::Import,
+                &unary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_response_status_id: module
+            .declare_function(
+                "stk_http_response_status",
+                Linkage::Import,
+                &unary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_response_body_id: module
+            .declare_function(
+                "stk_http_response_body",
+                Linkage::Import,
+                &unary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_response_set_header_id: module
+            .declare_function(
+                "stk_http_response_set_header",
+                Linkage::Import,
+                &ternary_i64_signature(false),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_response_header_id: module
+            .declare_function(
+                "stk_http_response_header",
+                Linkage::Import,
+                &binary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_request_method_id: module
+            .declare_function(
+                "stk_http_request_method",
+                Linkage::Import,
+                &unary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_request_path_id: module
+            .declare_function(
+                "stk_http_request_path",
+                Linkage::Import,
+                &unary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_request_body_id: module
+            .declare_function(
+                "stk_http_request_body",
+                Linkage::Import,
+                &unary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_request_query_id: module
+            .declare_function(
+                "stk_http_request_query",
+                Linkage::Import,
+                &binary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_request_header_id: module
+            .declare_function(
+                "stk_http_request_header",
+                Linkage::Import,
+                &binary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_request_param_id: module
+            .declare_function(
+                "stk_http_request_param",
+                Linkage::Import,
+                &binary_i64_signature(true),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_server_new_id: module
+            .declare_function(
+                "stk_http_server_new",
+                Linkage::Import,
+                &void_ret_i64_signature(),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_server_route_id: module
+            .declare_function(
+                "stk_http_server_route",
+                Linkage::Import,
+                &quaternary_i64_signature(false),
+            )
+            .map_err(|e| anyhow!("{e}"))?,
+        http_server_listen_id: module
+            .declare_function(
+                "stk_http_server_listen",
+                Linkage::Import,
+                &binary_i64_signature(true),
+            )
             .map_err(|e| anyhow!("{e}"))?,
         task_yield_id: module
             .declare_function("stk_task_yield", Linkage::Import, &Signature::new(CallConv::SystemV))
@@ -1506,7 +1846,26 @@ fn make_emit<'a, M: Module>(
         rwlock_get_id: runtime.rwlock_get_id,
         rwlock_set_id: runtime.rwlock_set_id,
         parallel_map_int_id: runtime.parallel_map_int_id,
-        http_get_id: runtime.http_get_id,
+        http_client_id: runtime.http_client_id,
+        http_headers_new_id: runtime.http_headers_new_id,
+        http_headers_set_id: runtime.http_headers_set_id,
+        http_headers_get_id: runtime.http_headers_get_id,
+        http_response_text_id: runtime.http_response_text_id,
+        http_response_json_id: runtime.http_response_json_id,
+        http_response_empty_id: runtime.http_response_empty_id,
+        http_response_status_id: runtime.http_response_status_id,
+        http_response_body_id: runtime.http_response_body_id,
+        http_response_set_header_id: runtime.http_response_set_header_id,
+        http_response_header_id: runtime.http_response_header_id,
+        http_request_method_id: runtime.http_request_method_id,
+        http_request_path_id: runtime.http_request_path_id,
+        http_request_body_id: runtime.http_request_body_id,
+        http_request_query_id: runtime.http_request_query_id,
+        http_request_header_id: runtime.http_request_header_id,
+        http_request_param_id: runtime.http_request_param_id,
+        http_server_new_id: runtime.http_server_new_id,
+        http_server_route_id: runtime.http_server_route_id,
+        http_server_listen_id: runtime.http_server_listen_id,
         task_yield_id: runtime.task_yield_id,
         cancel_token_new_id: runtime.cancel_token_new_id,
         cancel_token_cancel_id: runtime.cancel_token_cancel_id,
@@ -1538,6 +1897,7 @@ fn make_emit<'a, M: Module>(
         str_lens: HashMap::new(),
         loops: Vec::new(),
         async_complete_handle: None,
+        do_catches: Vec::new(),
     }
 }
 
@@ -2173,7 +2533,53 @@ impl<'a, M: Module> EmitCtx<'a, M> {
                 body,
             } => self.emit_for_in(builder, name, iter, elem, body),
             CheckedStmt::Match { scrutinee, arms } => self.emit_match(builder, scrutinee, arms),
+            CheckedStmt::DoCatch {
+                body,
+                catch_name,
+                catch_ty,
+                catch_body,
+            } => self.emit_do_catch(builder, body, catch_name, catch_ty, catch_body),
         }
+    }
+
+    fn emit_do_catch(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        body: &[CheckedStmt],
+        catch_name: &str,
+        catch_ty: &Ty,
+        catch_body: &[CheckedStmt],
+    ) -> Result<bool> {
+        let catch_b = builder.create_block();
+        builder.append_block_param(catch_b, types::I64);
+        let join = builder.create_block();
+        self.do_catches.push(catch_b);
+
+        let mut all_term = true;
+        let body_term = self.emit_stmts(builder, body)?;
+        if !body_term {
+            builder.ins().jump(join, &[]);
+            all_term = false;
+        }
+        self.do_catches.pop();
+
+        builder.switch_to_block(catch_b);
+        builder.seal_block(catch_b);
+        let err_val = builder.block_params(catch_b)[0];
+        let v = self.declare_var(builder, catch_name, types::I64);
+        builder.def_var(v, err_val);
+        if *catch_ty == Ty::String {
+            self.str_lens.insert(catch_name.to_string(), -1);
+        }
+        let catch_term = self.emit_stmts(builder, catch_body)?;
+        if !catch_term {
+            builder.ins().jump(join, &[]);
+            all_term = false;
+        }
+
+        builder.switch_to_block(join);
+        builder.seal_block(join);
+        Ok(all_term)
     }
 
     fn emit_for_in(
@@ -2790,6 +3196,12 @@ impl<'a, M: Module> EmitCtx<'a, M> {
                 let len = if *inner == Ty::String { Some(-1) } else { None };
                 Ok((Some(builder.inst_results(call)[0]), len))
             }
+            CheckedExpr::Try {
+                mode,
+                expr,
+                ok_ty,
+                err_ty,
+            } => self.emit_try(builder, *mode, expr, ok_ty, err_ty),
             CheckedExpr::StdLog { args } => {
                 self.emit_std_log(builder, args)?;
                 Ok((None, None))
@@ -3136,8 +3548,160 @@ impl<'a, M: Module> EmitCtx<'a, M> {
                 let call = builder.ins().call(rt, &[l.unwrap(), ptr]);
                 Ok((Some(builder.inst_results(call)[0]), None))
             }
-            CheckedExpr::HttpGet { url } => {
-                self.emit_runtime_call(builder, self.http_get_id, &[url], None)
+            CheckedExpr::HttpClient {
+                method,
+                url,
+                body,
+                headers,
+            } => {
+                let m = match method {
+                    HttpClientMethod::Get => 0,
+                    HttpClientMethod::Post => 1,
+                    HttpClientMethod::Put => 2,
+                    HttpClientMethod::Delete => 3,
+                    HttpClientMethod::Patch => 4,
+                };
+                let m_v = builder.ins().iconst(types::I64, m);
+                let (u, _) = self.emit_expr(builder, url)?;
+                let b = if let Some(body) = body {
+                    self.emit_expr(builder, body)?.0.unwrap()
+                } else {
+                    builder.ins().iconst(types::I64, 0)
+                };
+                let h = if let Some(headers) = headers {
+                    self.emit_expr(builder, headers)?.0.unwrap()
+                } else {
+                    builder.ins().iconst(types::I64, 0)
+                };
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.http_client_id, builder.func);
+                let call = builder
+                    .ins()
+                    .call(fref, &[m_v, u.unwrap(), b, h]);
+                Ok((Some(builder.inst_results(call)[0]), None))
+            }
+            CheckedExpr::HttpHeadersNew => {
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.http_headers_new_id, builder.func);
+                let call = builder.ins().call(fref, &[]);
+                Ok((Some(builder.inst_results(call)[0]), None))
+            }
+            CheckedExpr::HttpHeadersSet {
+                headers,
+                key,
+                value,
+            } => {
+                self.emit_runtime_call(
+                    builder,
+                    self.http_headers_set_id,
+                    &[headers, key, value],
+                    None,
+                )?;
+                Ok((None, None))
+            }
+            CheckedExpr::HttpHeadersGet { headers, key } => {
+                self.emit_runtime_call(builder, self.http_headers_get_id, &[headers, key], None)
+            }
+            CheckedExpr::HttpResponseNew { kind, status, body } => match kind {
+                HttpResponseKind::Empty => {
+                    self.emit_runtime_call(builder, self.http_response_empty_id, &[status], None)
+                }
+                HttpResponseKind::Text => self.emit_runtime_call(
+                    builder,
+                    self.http_response_text_id,
+                    &[status, body.as_ref().unwrap()],
+                    None,
+                ),
+                HttpResponseKind::Json => self.emit_runtime_call(
+                    builder,
+                    self.http_response_json_id,
+                    &[status, body.as_ref().unwrap()],
+                    None,
+                ),
+            },
+            CheckedExpr::HttpResponseStatus { response } => {
+                self.emit_runtime_call(builder, self.http_response_status_id, &[response], None)
+            }
+            CheckedExpr::HttpResponseBody { response } => {
+                self.emit_runtime_call(builder, self.http_response_body_id, &[response], Some(-1))
+            }
+            CheckedExpr::HttpResponseSetHeader {
+                response,
+                key,
+                value,
+            } => {
+                self.emit_runtime_call(
+                    builder,
+                    self.http_response_set_header_id,
+                    &[response, key, value],
+                    None,
+                )?;
+                Ok((None, None))
+            }
+            CheckedExpr::HttpResponseHeader { response, key } => {
+                self.emit_runtime_call(
+                    builder,
+                    self.http_response_header_id,
+                    &[response, key],
+                    None,
+                )
+            }
+            CheckedExpr::HttpRequestMethod { request } => {
+                self.emit_runtime_call(builder, self.http_request_method_id, &[request], Some(-1))
+            }
+            CheckedExpr::HttpRequestPath { request } => {
+                self.emit_runtime_call(builder, self.http_request_path_id, &[request], Some(-1))
+            }
+            CheckedExpr::HttpRequestBody { request } => {
+                self.emit_runtime_call(builder, self.http_request_body_id, &[request], Some(-1))
+            }
+            CheckedExpr::HttpRequestQuery { request, name } => {
+                self.emit_runtime_call(builder, self.http_request_query_id, &[request, name], None)
+            }
+            CheckedExpr::HttpRequestHeader { request, name } => {
+                self.emit_runtime_call(builder, self.http_request_header_id, &[request, name], None)
+            }
+            CheckedExpr::HttpRequestParam { request, name } => {
+                self.emit_runtime_call(
+                    builder,
+                    self.http_request_param_id,
+                    &[request, name],
+                    Some(-1),
+                )
+            }
+            CheckedExpr::HttpServerNew => {
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.http_server_new_id, builder.func);
+                let call = builder.ins().call(fref, &[]);
+                Ok((Some(builder.inst_results(call)[0]), None))
+            }
+            CheckedExpr::HttpServerRoute {
+                server,
+                method,
+                path,
+                handler,
+            } => {
+                let (s, _) = self.emit_expr(builder, server)?;
+                let (method_ptr, _) = self.emit_expr(
+                    builder,
+                    &CheckedExpr::StringLit(method.clone()),
+                )?;
+                let (p, _) = self.emit_expr(builder, path)?;
+                let (h, _) = self.emit_expr(builder, handler)?;
+                let fref = self
+                    .module
+                    .declare_func_in_func(self.http_server_route_id, builder.func);
+                builder.ins().call(
+                    fref,
+                    &[s.unwrap(), method_ptr.unwrap(), p.unwrap(), h.unwrap()],
+                );
+                Ok((None, None))
+            }
+            CheckedExpr::HttpServerListen { server, port } => {
+                self.emit_runtime_call(builder, self.http_server_listen_id, &[server, port], None)
             }
             CheckedExpr::TaskYield => {
                 let fref = self
@@ -3440,6 +4004,15 @@ impl<'a, M: Module> EmitCtx<'a, M> {
         value: &CheckedExpr,
     ) -> Result<(Option<Value>, Option<i64>)> {
         let (v, _) = self.emit_expr(builder, value)?;
+        self.emit_tagged_val(builder, tag, v.unwrap())
+    }
+
+    fn emit_tagged_val(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        tag: i64,
+        payload: Value,
+    ) -> Result<(Option<Value>, Option<i64>)> {
         let nbytes = builder.ins().iconst(types::I64, 16);
         let aref = self.module.declare_func_in_func(self.alloc_id, builder.func);
         let acall = builder.ins().call(aref, &[nbytes]);
@@ -3447,8 +4020,104 @@ impl<'a, M: Module> EmitCtx<'a, M> {
         let flags = MemFlags::trusted();
         let t = builder.ins().iconst(types::I64, tag);
         builder.ins().store(flags, t, ptr, 0);
-        builder.ins().store(flags, v.unwrap(), ptr, 8);
+        builder.ins().store(flags, payload, ptr, 8);
         Ok((Some(ptr), None))
+    }
+
+    fn emit_try(
+        &mut self,
+        builder: &mut FunctionBuilder,
+        mode: TryMode,
+        expr: &CheckedExpr,
+        ok_ty: &Ty,
+        err_ty: &Ty,
+    ) -> Result<(Option<Value>, Option<i64>)> {
+        let (sval, _) = self.emit_expr(builder, expr)?;
+        let sval = sval.ok_or_else(|| anyhow!("void used with try"))?;
+        let flags = MemFlags::trusted();
+        let tag = builder.ins().load(types::I64, flags, sval, 0);
+        let payload = builder.ins().load(types::I64, flags, sval, 8);
+        let zero = builder.ins().iconst(types::I64, 0);
+        let is_ok = self.icmp_i64(builder, IntCC::Equal, tag, zero);
+        let ok_slen = if *ok_ty == Ty::String { Some(-1i64) } else { None };
+
+        match mode {
+            TryMode::Unwrap => {
+                let catch_b = *self
+                    .do_catches
+                    .last()
+                    .ok_or_else(|| anyhow!("try unwrap without do/catch frame"))?;
+                let cont = builder.create_block();
+                builder.append_block_param(cont, types::I64);
+                let err_b = builder.create_block();
+                builder.ins().brif(is_ok, cont, &[payload], err_b, &[]);
+
+                builder.switch_to_block(err_b);
+                builder.seal_block(err_b);
+                builder.ins().jump(catch_b, &[payload]);
+
+                builder.switch_to_block(cont);
+                builder.seal_block(cont);
+                Ok((Some(builder.block_params(cont)[0]), ok_slen))
+            }
+            TryMode::Option => {
+                let join = builder.create_block();
+                builder.append_block_param(join, types::I64);
+                let ok_b = builder.create_block();
+                let err_b = builder.create_block();
+                builder.ins().brif(is_ok, ok_b, &[], err_b, &[]);
+
+                builder.switch_to_block(ok_b);
+                builder.seal_block(ok_b);
+                let (some, _) = self.emit_tagged_val(builder, 0, payload)?;
+                builder.ins().jump(join, &[some.unwrap()]);
+
+                builder.switch_to_block(err_b);
+                builder.seal_block(err_b);
+                let none_payload = builder.ins().iconst(types::I64, 0);
+                let (none, _) = self.emit_tagged_val(builder, 1, none_payload)?;
+                builder.ins().jump(join, &[none.unwrap()]);
+
+                builder.switch_to_block(join);
+                builder.seal_block(join);
+                Ok((Some(builder.block_params(join)[0]), None))
+            }
+            TryMode::Force => {
+                let join = builder.create_block();
+                builder.append_block_param(join, types::I64);
+                let ok_b = builder.create_block();
+                let err_b = builder.create_block();
+                builder.ins().brif(is_ok, ok_b, &[], err_b, &[]);
+
+                builder.switch_to_block(err_b);
+                builder.seal_block(err_b);
+                let msg = if *err_ty == Ty::String {
+                    payload
+                } else {
+                    let (id, _len) = self
+                        .strings
+                        .get(b"try! failed".as_slice())
+                        .copied()
+                        .ok_or_else(|| anyhow!("missing try! failed string"))?;
+                    let gv = self.module.declare_data_in_func(id, builder.func);
+                    builder.ins().global_value(types::I64, gv)
+                };
+                let pref = self
+                    .module
+                    .declare_func_in_func(self.panic_id, builder.func);
+                builder.ins().call(pref, &[msg]);
+                let dummy = builder.ins().iconst(types::I64, 0);
+                builder.ins().jump(join, &[dummy]);
+
+                builder.switch_to_block(ok_b);
+                builder.seal_block(ok_b);
+                builder.ins().jump(join, &[payload]);
+
+                builder.switch_to_block(join);
+                builder.seal_block(join);
+                Ok((Some(builder.block_params(join)[0]), ok_slen))
+            }
+        }
     }
 
     fn emit_std_log(

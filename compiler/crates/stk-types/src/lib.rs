@@ -47,6 +47,10 @@ pub enum Ty {
         params: Vec<Ty>,
         ret: Box<Ty>,
     },
+    HttpRequest,
+    HttpResponse,
+    HttpHeaders,
+    HttpServer,
 }
 
 /// Named types resolved in O(1) average via hash sets.
@@ -173,6 +177,10 @@ impl Ty {
                     elem: Box::new(elem),
                 })
             }
+            TypeName::HttpRequest => Ok(Ty::HttpRequest),
+            TypeName::HttpResponse => Ok(Ty::HttpResponse),
+            TypeName::HttpHeaders => Ok(Ty::HttpHeaders),
+            TypeName::HttpServer => Ok(Ty::HttpServer),
         }
     }
 
@@ -199,6 +207,10 @@ impl Ty {
                 let ps: Vec<_> = params.iter().map(|p| p.mangle_name()).collect();
                 format!("fn_{}_{}", ps.join("_"), ret.mangle_name())
             }
+            Ty::HttpRequest => "HttpRequest".into(),
+            Ty::HttpResponse => "HttpResponse".into(),
+            Ty::HttpHeaders => "HttpHeaders".into(),
+            Ty::HttpServer => "HttpServer".into(),
         }
     }
 }
@@ -398,6 +410,13 @@ pub enum CheckedStmt {
         scrutinee: CheckedExpr,
         arms: Vec<(CheckedPattern, Vec<CheckedStmt>)>,
     },
+    /// `do { … } catch name { … }`
+    DoCatch {
+        body: Vec<CheckedStmt>,
+        catch_name: String,
+        catch_ty: Ty,
+        catch_body: Vec<CheckedStmt>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -454,6 +473,13 @@ pub enum CheckedExpr {
     Await {
         expr: Box<CheckedExpr>,
         inner: Ty,
+    },
+    /// `try` / `try?` / `try!` over a `Result`
+    Try {
+        mode: TryMode,
+        expr: Box<CheckedExpr>,
+        ok_ty: Ty,
+        err_ty: Ty,
     },
     Binary {
         op: BinOp,
@@ -599,8 +625,74 @@ pub enum CheckedExpr {
         list: Box<CheckedExpr>,
         fn_name: String,
     },
-    HttpGet {
+    /// Async HTTP client call → Future<Result<Response,string>>
+    HttpClient {
+        method: HttpClientMethod,
         url: Box<CheckedExpr>,
+        body: Option<Box<CheckedExpr>>,
+        headers: Option<Box<CheckedExpr>>,
+    },
+    HttpHeadersNew,
+    HttpHeadersSet {
+        headers: Box<CheckedExpr>,
+        key: Box<CheckedExpr>,
+        value: Box<CheckedExpr>,
+    },
+    HttpHeadersGet {
+        headers: Box<CheckedExpr>,
+        key: Box<CheckedExpr>,
+    },
+    HttpResponseNew {
+        kind: HttpResponseKind,
+        status: Box<CheckedExpr>,
+        body: Option<Box<CheckedExpr>>,
+    },
+    HttpResponseStatus {
+        response: Box<CheckedExpr>,
+    },
+    HttpResponseBody {
+        response: Box<CheckedExpr>,
+    },
+    HttpResponseSetHeader {
+        response: Box<CheckedExpr>,
+        key: Box<CheckedExpr>,
+        value: Box<CheckedExpr>,
+    },
+    HttpResponseHeader {
+        response: Box<CheckedExpr>,
+        key: Box<CheckedExpr>,
+    },
+    HttpRequestMethod {
+        request: Box<CheckedExpr>,
+    },
+    HttpRequestPath {
+        request: Box<CheckedExpr>,
+    },
+    HttpRequestBody {
+        request: Box<CheckedExpr>,
+    },
+    HttpRequestQuery {
+        request: Box<CheckedExpr>,
+        name: Box<CheckedExpr>,
+    },
+    HttpRequestHeader {
+        request: Box<CheckedExpr>,
+        name: Box<CheckedExpr>,
+    },
+    HttpRequestParam {
+        request: Box<CheckedExpr>,
+        name: Box<CheckedExpr>,
+    },
+    HttpServerNew,
+    HttpServerRoute {
+        server: Box<CheckedExpr>,
+        method: String,
+        path: Box<CheckedExpr>,
+        handler: Box<CheckedExpr>,
+    },
+    HttpServerListen {
+        server: Box<CheckedExpr>,
+        port: Box<CheckedExpr>,
     },
     TaskYield,
     CancelTokenNew,
@@ -722,6 +814,8 @@ struct CheckCtx<'a> {
     current_class: Option<&'a str>,
     current_module: &'a str,
     in_async: bool,
+    /// When `Some`, we are inside a `do` block; the cell holds the unified err type (`None` until first `try`).
+    do_catch: Option<&'a Cell<Option<Ty>>>,
     /// Top-level `const` literals visible in the current module (folded at use sites).
     const_lits: HashMap<String, LitValue>,
     async_block_index: &'a Cell<usize>,
@@ -874,6 +968,7 @@ pub fn typecheck(program: &Program, entry_module: &str) -> Result<CheckedProgram
             current_class: None,
             current_module: f.module.as_str(),
             in_async: f.is_async,
+            do_catch: None,
             const_lits: module_const_lits(&program.constants, f.module.as_str())?,
             async_block_index: &async_block_index,
             spawn_index: &spawn_index,
@@ -896,6 +991,7 @@ pub fn typecheck(program: &Program, entry_module: &str) -> Result<CheckedProgram
                 current_class: Some(&c.name),
                 current_module: c.module.as_str(),
                 in_async: false,
+                do_catch: None,
                 const_lits: module_const_lits(&program.constants, c.module.as_str())?,
                 async_block_index: &async_block_index,
                 spawn_index: &spawn_index,
@@ -923,6 +1019,7 @@ pub fn typecheck(program: &Program, entry_module: &str) -> Result<CheckedProgram
                     current_class: Some(&c.name),
                     current_module: c.module.as_str(),
                     in_async: false,
+                    do_catch: None,
                     const_lits: module_const_lits(&program.constants, c.module.as_str())?,
                     async_block_index: &async_block_index,
                     spawn_index: &spawn_index,
@@ -1130,6 +1227,17 @@ fn free_locals(stmts: &[CheckedStmt]) -> Vec<String> {
                         walk_stmts(b, declared, used);
                     }
                 }
+                CheckedStmt::DoCatch {
+                    body,
+                    catch_name,
+                    catch_body,
+                    ..
+                } => {
+                    walk_stmts(body, declared, used);
+                    let mut inner = declared.clone();
+                    inner.insert(catch_name.clone());
+                    walk_stmts(catch_body, &mut inner, used);
+                }
                 CheckedStmt::Break | CheckedStmt::Continue => {}
             }
         }
@@ -1149,7 +1257,9 @@ fn free_locals(stmts: &[CheckedStmt]) -> Vec<String> {
                 walk_expr_free(left, declared, used);
                 walk_expr_free(right, declared, used);
             }
-            CheckedExpr::Unary { expr, .. } | CheckedExpr::Await { expr, .. } => {
+            CheckedExpr::Unary { expr, .. }
+            | CheckedExpr::Await { expr, .. }
+            | CheckedExpr::Try { expr, .. } => {
                 walk_expr_free(expr, declared, used);
             }
             CheckedExpr::Call { args, .. }
@@ -2351,6 +2461,71 @@ fn check_stmt(
                 arms: checked_arms,
             })
         }
+        Stmt::DoCatch {
+            body,
+            catch_name,
+            catch_body,
+            span,
+        } => {
+            let err_cell = Cell::new(None);
+            let do_ctx = CheckCtx {
+                sigs: ctx.sigs,
+                classes: ctx.classes,
+                type_names: ctx.type_names,
+                generic_fns: ctx.generic_fns,
+                mono: ctx.mono,
+                mono_sigs: ctx.mono_sigs,
+                has_std: ctx.has_std,
+                current_class: ctx.current_class,
+                current_module: ctx.current_module,
+                in_async: ctx.in_async,
+                do_catch: Some(&err_cell),
+                const_lits: ctx.const_lits.clone(),
+                async_block_index: ctx.async_block_index,
+                spawn_index: ctx.spawn_index,
+                closure_index: ctx.closure_index,
+            };
+            let mut body_env = env.clone();
+            let mut body_owned = owned.clone();
+            let mut body_imm = immutable.clone();
+            let checked_body = check_block(
+                &body.stmts,
+                &mut body_env,
+                &do_ctx,
+                fn_ret,
+                loop_depth,
+                &mut body_owned,
+                &mut body_imm,
+                false,
+            )?;
+            let catch_ty = err_cell.into_inner().unwrap_or(Ty::String);
+            let mut catch_env = env.clone();
+            if catch_env.contains_key(catch_name) {
+                return Err(Diagnostic::new(
+                    format!("'{catch_name}' already declared"),
+                    *span,
+                ));
+            }
+            catch_env.insert(catch_name.clone(), catch_ty.clone());
+            let mut catch_owned = owned.clone();
+            let mut catch_imm = immutable.clone();
+            let checked_catch = check_block(
+                &catch_body.stmts,
+                &mut catch_env,
+                ctx,
+                fn_ret,
+                loop_depth,
+                &mut catch_owned,
+                &mut catch_imm,
+                false,
+            )?;
+            Ok(CheckedStmt::DoCatch {
+                body: checked_body,
+                catch_name: catch_name.clone(),
+                catch_ty,
+                catch_body: checked_catch,
+            })
+        }
     }
 }
 
@@ -2666,6 +2841,76 @@ fn check_expr(
                 },
             ))
         }
+        Expr::Try { mode, expr, span } => {
+            let (ty, e) = check_expr(expr, env, ctx)?;
+            let Ty::Result { ok, err } = ty else {
+                return Err(Diagnostic::new(
+                    "'try' requires a Result value",
+                    *span,
+                ));
+            };
+            match mode {
+                TryMode::Unwrap => {
+                    let Some(cell) = ctx.do_catch else {
+                        return Err(Diagnostic::new(
+                            "'try' (unwrap) is only valid inside a do { … } catch block; use try? or try!",
+                            *span,
+                        ));
+                    };
+                    match cell.take() {
+                        None => cell.set(Some((*err).clone())),
+                        Some(existing) => {
+                            if existing != *err {
+                                return Err(Diagnostic::new(
+                                    format!(
+                                        "do/catch error type mismatch: expected {}, found {}",
+                                        existing.mangle_name(),
+                                        err.mangle_name()
+                                    ),
+                                    *span,
+                                ));
+                            }
+                            cell.set(Some(existing));
+                        }
+                    }
+                    Ok((
+                        (*ok).clone(),
+                        CheckedExpr::Try {
+                            mode: *mode,
+                            expr: Box::new(e),
+                            ok_ty: (*ok).clone(),
+                            err_ty: (*err).clone(),
+                        },
+                    ))
+                }
+                TryMode::Option => Ok((
+                    ty_option((*ok).clone()),
+                    CheckedExpr::Try {
+                        mode: *mode,
+                        expr: Box::new(e),
+                        ok_ty: (*ok).clone(),
+                        err_ty: (*err).clone(),
+                    },
+                )),
+                TryMode::Force => {
+                    if !ctx.has_std {
+                        return Err(Diagnostic::new(
+                            "try! requires @import \"std\" (uses std.panic)",
+                            *span,
+                        ));
+                    }
+                    Ok((
+                        (*ok).clone(),
+                        CheckedExpr::Try {
+                            mode: *mode,
+                            expr: Box::new(e),
+                            ok_ty: (*ok).clone(),
+                            err_ty: (*err).clone(),
+                        },
+                    ))
+                }
+            }
+        }
         Expr::AsyncBlock { body, span } => {
             let index = ctx.async_block_index.get();
             ctx.async_block_index.set(index + 1);
@@ -2680,6 +2925,7 @@ fn check_expr(
                 current_class: ctx.current_class,
                 current_module: ctx.current_module,
                 in_async: true,
+                do_catch: None,
                 const_lits: ctx.const_lits.clone(),
                 async_block_index: ctx.async_block_index,
                 spawn_index: ctx.spawn_index,
@@ -2762,6 +3008,7 @@ fn check_expr(
                 current_class: ctx.current_class,
                 current_module: ctx.current_module,
                 in_async: false,
+                do_catch: None,
                 const_lits: ctx.const_lits.clone(),
                 async_block_index: ctx.async_block_index,
                 spawn_index: ctx.spawn_index,
@@ -3282,6 +3529,270 @@ fn check_expr(
                         *span,
                     )),
                 },
+                Ty::HttpHeaders => match method.as_str() {
+                    "set" => {
+                        if args.len() != 2 {
+                            return Err(Diagnostic::new(
+                                "Headers.set expects (key, value)",
+                                *span,
+                            ));
+                        }
+                        let (kt, ke) = check_expr(&args[0], env, ctx)?;
+                        let (vt, ve) = check_expr(&args[1], env, ctx)?;
+                        if kt != Ty::String || vt != Ty::String {
+                            return Err(Diagnostic::new(
+                                "Headers.set requires string key and value",
+                                *span,
+                            ));
+                        }
+                        Ok((
+                            Ty::Void,
+                            CheckedExpr::HttpHeadersSet {
+                                headers: Box::new(oexpr),
+                                key: Box::new(ke),
+                                value: Box::new(ve),
+                            },
+                        ))
+                    }
+                    "get" => {
+                        if args.len() != 1 {
+                            return Err(Diagnostic::new("Headers.get expects one string", *span));
+                        }
+                        let (kt, ke) = check_expr(&args[0], env, ctx)?;
+                        if kt != Ty::String {
+                            return Err(Diagnostic::new(
+                                "Headers.get key must be string",
+                                args[0].span(),
+                            ));
+                        }
+                        Ok((
+                            Ty::Option {
+                                inner: Box::new(Ty::String),
+                            },
+                            CheckedExpr::HttpHeadersGet {
+                                headers: Box::new(oexpr),
+                                key: Box::new(ke),
+                            },
+                        ))
+                    }
+                    _ => Err(Diagnostic::new(
+                        format!("unknown Headers method '{method}'"),
+                        *span,
+                    )),
+                },
+                Ty::HttpRequest => match method.as_str() {
+                    "method" | "path" | "body" => {
+                        if !args.is_empty() {
+                            return Err(Diagnostic::new(
+                                format!("Request.{method} takes no arguments"),
+                                *span,
+                            ));
+                        }
+                        let ce = match method.as_str() {
+                            "method" => CheckedExpr::HttpRequestMethod {
+                                request: Box::new(oexpr),
+                            },
+                            "path" => CheckedExpr::HttpRequestPath {
+                                request: Box::new(oexpr),
+                            },
+                            _ => CheckedExpr::HttpRequestBody {
+                                request: Box::new(oexpr),
+                            },
+                        };
+                        Ok((Ty::String, ce))
+                    }
+                    "query" | "header" | "param" => {
+                        if args.len() != 1 {
+                            return Err(Diagnostic::new(
+                                format!("Request.{method} expects one string"),
+                                *span,
+                            ));
+                        }
+                        let (nt, ne) = check_expr(&args[0], env, ctx)?;
+                        if nt != Ty::String {
+                            return Err(Diagnostic::new(
+                                format!("Request.{method} name must be string"),
+                                args[0].span(),
+                            ));
+                        }
+                        match method.as_str() {
+                            "param" => Ok((
+                                Ty::String,
+                                CheckedExpr::HttpRequestParam {
+                                    request: Box::new(oexpr),
+                                    name: Box::new(ne),
+                                },
+                            )),
+                            "query" => Ok((
+                                Ty::Option {
+                                    inner: Box::new(Ty::String),
+                                },
+                                CheckedExpr::HttpRequestQuery {
+                                    request: Box::new(oexpr),
+                                    name: Box::new(ne),
+                                },
+                            )),
+                            _ => Ok((
+                                Ty::Option {
+                                    inner: Box::new(Ty::String),
+                                },
+                                CheckedExpr::HttpRequestHeader {
+                                    request: Box::new(oexpr),
+                                    name: Box::new(ne),
+                                },
+                            )),
+                        }
+                    }
+                    _ => Err(Diagnostic::new(
+                        format!("unknown Request method '{method}'"),
+                        *span,
+                    )),
+                },
+                Ty::HttpResponse => match method.as_str() {
+                    "status" => {
+                        if !args.is_empty() {
+                            return Err(Diagnostic::new(
+                                "Response.status takes no arguments",
+                                *span,
+                            ));
+                        }
+                        Ok((
+                            Ty::Int,
+                            CheckedExpr::HttpResponseStatus {
+                                response: Box::new(oexpr),
+                            },
+                        ))
+                    }
+                    "body" => {
+                        if !args.is_empty() {
+                            return Err(Diagnostic::new(
+                                "Response.body takes no arguments",
+                                *span,
+                            ));
+                        }
+                        Ok((
+                            Ty::String,
+                            CheckedExpr::HttpResponseBody {
+                                response: Box::new(oexpr),
+                            },
+                        ))
+                    }
+                    "setHeader" => {
+                        if args.len() != 2 {
+                            return Err(Diagnostic::new(
+                                "Response.setHeader expects (key, value)",
+                                *span,
+                            ));
+                        }
+                        let (kt, ke) = check_expr(&args[0], env, ctx)?;
+                        let (vt, ve) = check_expr(&args[1], env, ctx)?;
+                        if kt != Ty::String || vt != Ty::String {
+                            return Err(Diagnostic::new(
+                                "Response.setHeader requires strings",
+                                *span,
+                            ));
+                        }
+                        Ok((
+                            Ty::Void,
+                            CheckedExpr::HttpResponseSetHeader {
+                                response: Box::new(oexpr),
+                                key: Box::new(ke),
+                                value: Box::new(ve),
+                            },
+                        ))
+                    }
+                    "header" => {
+                        if args.len() != 1 {
+                            return Err(Diagnostic::new(
+                                "Response.header expects one string",
+                                *span,
+                            ));
+                        }
+                        let (kt, ke) = check_expr(&args[0], env, ctx)?;
+                        if kt != Ty::String {
+                            return Err(Diagnostic::new(
+                                "Response.header key must be string",
+                                args[0].span(),
+                            ));
+                        }
+                        Ok((
+                            Ty::Option {
+                                inner: Box::new(Ty::String),
+                            },
+                            CheckedExpr::HttpResponseHeader {
+                                response: Box::new(oexpr),
+                                key: Box::new(ke),
+                            },
+                        ))
+                    }
+                    _ => Err(Diagnostic::new(
+                        format!("unknown Response method '{method}'"),
+                        *span,
+                    )),
+                },
+                Ty::HttpServer => match method.as_str() {
+                    "get" | "post" | "put" | "delete" | "patch" => {
+                        if args.len() != 2 {
+                            return Err(Diagnostic::new(
+                                format!("Server.{method} expects (path, handler)"),
+                                *span,
+                            ));
+                        }
+                        let (pty, pe) = check_expr(&args[0], env, ctx)?;
+                        if pty != Ty::String {
+                            return Err(Diagnostic::new(
+                                "route path must be string",
+                                args[0].span(),
+                            ));
+                        }
+                        let (hty, he) = check_expr(&args[1], env, ctx)?;
+                        let handler_ty = Ty::Fn {
+                            params: vec![Ty::HttpRequest],
+                            ret: Box::new(Ty::HttpResponse),
+                        };
+                        if !ty_assignable(&hty, &handler_ty, ctx) {
+                            return Err(Diagnostic::new(
+                                "handler must be fn(Request) Response",
+                                args[1].span(),
+                            ));
+                        }
+                        Ok((
+                            Ty::Void,
+                            CheckedExpr::HttpServerRoute {
+                                server: Box::new(oexpr),
+                                method: method.to_ascii_uppercase(),
+                                path: Box::new(pe),
+                                handler: Box::new(he),
+                            },
+                        ))
+                    }
+                    "listen" => {
+                        if args.len() != 1 {
+                            return Err(Diagnostic::new(
+                                "Server.listen expects one port int",
+                                *span,
+                            ));
+                        }
+                        let (pty, pe) = check_expr(&args[0], env, ctx)?;
+                        if pty != Ty::Int {
+                            return Err(Diagnostic::new(
+                                "listen port must be int",
+                                args[0].span(),
+                            ));
+                        }
+                        Ok((
+                            Ty::Future(Box::new(ty_result(Ty::Int, Ty::String))),
+                            CheckedExpr::HttpServerListen {
+                                server: Box::new(oexpr),
+                                port: Box::new(pe),
+                            },
+                        ))
+                    }
+                    _ => Err(Diagnostic::new(
+                        format!("unknown Server method '{method}'"),
+                        *span,
+                    )),
+                },
                 Ty::Class(ref cname) => {
                     let minfo = lookup_method(ctx, cname, method, *span)?;
                     check_method_vis(ctx, &minfo, *span)?;
@@ -3305,7 +3816,7 @@ fn check_expr(
                     ))
                 }
                 _ => Err(Diagnostic::new(
-                    "method call requires a class instance, Channel, WaitGroup, or Mutex",
+                    "method call requires a class instance or std handle type",
                     *span,
                 )),
             }
@@ -4353,30 +4864,157 @@ fn check_expr(
                     },
                 ))
             }
-            Callee::StdHttpGet { .. } => {
+            Callee::StdHttpClient { method, .. } => {
                 if !ctx.has_std {
                     return Err(Diagnostic::new(
                         "std.http requires @import \"std\"",
                         *span,
                     ));
                 }
-                if args.len() != 1 {
+                let needs_body = matches!(
+                    method,
+                    HttpClientMethod::Post | HttpClientMethod::Put | HttpClientMethod::Patch
+                );
+                let (url_e, body_e, headers_e) = if needs_body {
+                    if args.len() < 2 || args.len() > 3 {
+                        return Err(Diagnostic::new(
+                            "std.http post/put/patch expects (url, body) or (url, body, Headers)",
+                            *span,
+                        ));
+                    }
+                    let (uty, ue) = check_expr(&args[0], env, ctx)?;
+                    let (bty, be) = check_expr(&args[1], env, ctx)?;
+                    if uty != Ty::String || bty != Ty::String {
+                        return Err(Diagnostic::new(
+                            "url and body must be strings",
+                            *span,
+                        ));
+                    }
+                    let headers = if args.len() == 3 {
+                        let (hty, he) = check_expr(&args[2], env, ctx)?;
+                        if hty != Ty::HttpHeaders {
+                            return Err(Diagnostic::new(
+                                "third argument must be Headers",
+                                args[2].span(),
+                            ));
+                        }
+                        Some(Box::new(he))
+                    } else {
+                        None
+                    };
+                    (ue, Some(Box::new(be)), headers)
+                } else {
+                    if args.is_empty() || args.len() > 2 {
+                        return Err(Diagnostic::new(
+                            "std.http get/delete expects (url) or (url, Headers)",
+                            *span,
+                        ));
+                    }
+                    let (uty, ue) = check_expr(&args[0], env, ctx)?;
+                    if uty != Ty::String {
+                        return Err(Diagnostic::new("url must be string", args[0].span()));
+                    }
+                    let headers = if args.len() == 2 {
+                        let (hty, he) = check_expr(&args[1], env, ctx)?;
+                        if hty != Ty::HttpHeaders {
+                            return Err(Diagnostic::new(
+                                "second argument must be Headers",
+                                args[1].span(),
+                            ));
+                        }
+                        Some(Box::new(he))
+                    } else {
+                        None
+                    };
+                    (ue, None, headers)
+                };
+                Ok((
+                    Ty::Future(Box::new(ty_result(Ty::HttpResponse, Ty::String))),
+                    CheckedExpr::HttpClient {
+                        method: *method,
+                        url: Box::new(url_e),
+                        body: body_e,
+                        headers: headers_e,
+                    },
+                ))
+            }
+            Callee::StdHttpHeadersNew { .. } => {
+                if !ctx.has_std {
                     return Err(Diagnostic::new(
-                        "std.http.get expects one url string",
+                        "std.http requires @import \"std\"",
                         *span,
                     ));
                 }
-                let (ty, e) = check_expr(&args[0], env, ctx)?;
-                if ty != Ty::String {
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("Headers.new takes no arguments", *span));
+                }
+                Ok((Ty::HttpHeaders, CheckedExpr::HttpHeadersNew))
+            }
+            Callee::StdHttpResponseNew { kind, .. } => {
+                if !ctx.has_std {
                     return Err(Diagnostic::new(
-                        "std.http.get url must be string",
-                        args[0].span(),
+                        "std.http requires @import \"std\"",
+                        *span,
                     ));
                 }
-                Ok((
-                    ty_result(Ty::String, Ty::String),
-                    CheckedExpr::HttpGet { url: Box::new(e) },
-                ))
+                match kind {
+                    HttpResponseKind::Empty => {
+                        if args.len() != 1 {
+                            return Err(Diagnostic::new(
+                                "Response.empty expects (status)",
+                                *span,
+                            ));
+                        }
+                        let (sty, se) = check_expr(&args[0], env, ctx)?;
+                        if sty != Ty::Int {
+                            return Err(Diagnostic::new("status must be int", args[0].span()));
+                        }
+                        Ok((
+                            Ty::HttpResponse,
+                            CheckedExpr::HttpResponseNew {
+                                kind: *kind,
+                                status: Box::new(se),
+                                body: None,
+                            },
+                        ))
+                    }
+                    HttpResponseKind::Text | HttpResponseKind::Json => {
+                        if args.len() != 2 {
+                            return Err(Diagnostic::new(
+                                "Response.text/json expects (status, body)",
+                                *span,
+                            ));
+                        }
+                        let (sty, se) = check_expr(&args[0], env, ctx)?;
+                        let (bty, be) = check_expr(&args[1], env, ctx)?;
+                        if sty != Ty::Int || bty != Ty::String {
+                            return Err(Diagnostic::new(
+                                "status must be int and body string",
+                                *span,
+                            ));
+                        }
+                        Ok((
+                            Ty::HttpResponse,
+                            CheckedExpr::HttpResponseNew {
+                                kind: *kind,
+                                status: Box::new(se),
+                                body: Some(Box::new(be)),
+                            },
+                        ))
+                    }
+                }
+            }
+            Callee::StdHttpServerNew { .. } => {
+                if !ctx.has_std {
+                    return Err(Diagnostic::new(
+                        "std.http requires @import \"std\"",
+                        *span,
+                    ));
+                }
+                if !args.is_empty() {
+                    return Err(Diagnostic::new("Server.new takes no arguments", *span));
+                }
+                Ok((Ty::HttpServer, CheckedExpr::HttpServerNew))
             }
             Callee::StdTaskYield { .. } => {
                 if !ctx.has_std {
@@ -4915,6 +5553,10 @@ fn ty_to_type_name(t: &Ty) -> Result<TypeName, String> {
         },
         Ty::Option { inner } => TypeName::Option(Box::new(ty_to_type_name(inner)?)),
         Ty::List { elem } => TypeName::List(Box::new(ty_to_type_name(elem)?)),
+        Ty::HttpRequest => TypeName::HttpRequest,
+        Ty::HttpResponse => TypeName::HttpResponse,
+        Ty::HttpHeaders => TypeName::HttpHeaders,
+        Ty::HttpServer => TypeName::HttpServer,
         Ty::CancelToken | Ty::Fn { .. } => {
             return Err("cannot use this type as a generic type argument".into());
         }

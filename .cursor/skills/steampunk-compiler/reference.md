@@ -7,6 +7,7 @@ Canonical details: repo root `SPEC.md`.
 ```
 fn async await spawn pub priv prot class iclass new
 var const return if else while for break continue match
+do try catch
 true false null self super as import module defer
 ```
 
@@ -30,6 +31,8 @@ true false null self super as import module defer
 | Float | `3.14`, type `float` |
 | Decorator | `@encodeProperty("wire")` / `@ignore` before `pub var` |
 | Serde | `std.json.encode(u)` / `std.json.decode<User>(s)` (+ yaml/toml/toon) |
+| HTTP | `await std.http.get(url)` → `Response`; `Server.new()` + routes + `listen` |
+| Errors | `do { var x = try expr } catch e {…}` · `try?` → Option · `try!` → panic |
 | Type args | `f<T>(…)` on calls |
 
 ## Visibility
@@ -57,6 +60,7 @@ true false null self super as import module defer
 | `std.string.*` | len, concat, slice, contains, fromInt, parseInt |
 | `std.List<T>` | new, push, get, set, len |
 | `std.json` / `yaml` / `toml` / `toon` | `encode` / `decode<T>` → `Result` |
+| `std.http` | Client `get`/`post`/… → `Future<Result<Response,string>>`; `Server` REST |
 | `std.sync.Channel/WaitGroup/Mutex` | int\|string elems |
 | `std.cpu.submit` | `fn() int\|string` → `Future<T>` |
 

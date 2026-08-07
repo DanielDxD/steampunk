@@ -922,6 +922,20 @@ impl Parser {
                         }
                         Ok(TypeName::List(Box::new(elem)))
                     }
+                    "http" => {
+                        self.expect(TokenKind::Dot)?;
+                        let (http_ty, http_span) = self.expect_ident()?;
+                        match http_ty.as_str() {
+                            "Request" => Ok(TypeName::HttpRequest),
+                            "Response" => Ok(TypeName::HttpResponse),
+                            "Headers" => Ok(TypeName::HttpHeaders),
+                            "Server" => Ok(TypeName::HttpServer),
+                            _ => Err(Diagnostic::new(
+                                format!("unknown std.http type '{http_ty}'"),
+                                http_span,
+                            )),
+                        }
+                    }
                     _ => Err(Diagnostic::new(
                         format!("unknown std type '{kind}'"),
                         kind_span,
@@ -983,6 +997,7 @@ impl Parser {
             TokenKind::While => self.parse_while(),
             TokenKind::For => self.parse_for(),
             TokenKind::Match => self.parse_match(),
+            TokenKind::Do => self.parse_do_catch(),
             TokenKind::Break => {
                 let span = self.bump().span;
                 Ok(Stmt::Break { span })
@@ -1000,6 +1015,7 @@ impl Parser {
                         | TokenKind::While
                         | TokenKind::For
                         | TokenKind::Match
+                        | TokenKind::Do
                         | TokenKind::Return
                         | TokenKind::Break
                         | TokenKind::Continue
@@ -1165,6 +1181,21 @@ impl Parser {
             scrutinee,
             arms,
             span: Span::new(start.start, end.end),
+        })
+    }
+
+    fn parse_do_catch(&mut self) -> Result<Stmt, Diagnostic> {
+        let start = self.expect(TokenKind::Do)?;
+        let body = self.parse_block()?;
+        self.expect(TokenKind::Catch)?;
+        let (catch_name, _) = self.expect_ident()?;
+        let catch_body = self.parse_block()?;
+        let end = catch_body.span.end;
+        Ok(Stmt::DoCatch {
+            body,
+            catch_name,
+            catch_body,
+            span: Span::new(start.start, end),
         })
     }
 
@@ -1460,6 +1491,24 @@ impl Parser {
                 self.bump();
                 let expr = self.parse_postfix()?;
                 Ok(Expr::Await {
+                    span: Span::new(tok.span.start, expr.span().end),
+                    expr: Box::new(expr),
+                })
+            }
+            TokenKind::Try => {
+                self.bump();
+                let mode = if matches!(self.peek().kind, TokenKind::Question) {
+                    self.bump();
+                    TryMode::Option
+                } else if matches!(self.peek().kind, TokenKind::Bang) {
+                    self.bump();
+                    TryMode::Force
+                } else {
+                    TryMode::Unwrap
+                };
+                let expr = self.parse_postfix()?;
+                Ok(Expr::Try {
+                    mode,
                     span: Span::new(tok.span.start, expr.span().end),
                     expr: Box::new(expr),
                 })
@@ -1840,22 +1889,105 @@ impl Parser {
                         "http" => {
                             self.expect(TokenKind::Dot)?;
                             let (method, method_span) = self.expect_ident()?;
-                            if method != "get" {
-                                return Err(Diagnostic::new(
-                                    "expected std.http.get(...)",
-                                    method_span,
-                                ));
+                            match method.as_str() {
+                                "get" | "post" | "put" | "delete" | "patch" => {
+                                    let verb = match method.as_str() {
+                                        "get" => HttpClientMethod::Get,
+                                        "post" => HttpClientMethod::Post,
+                                        "put" => HttpClientMethod::Put,
+                                        "delete" => HttpClientMethod::Delete,
+                                        "patch" => HttpClientMethod::Patch,
+                                        _ => unreachable!(),
+                                    };
+                                    self.expect(TokenKind::LParen)?;
+                                    let args = self.parse_arg_list()?;
+                                    let end = self.expect(TokenKind::RParen)?;
+                                    return Ok(Expr::Call {
+                                        callee: Callee::StdHttpClient {
+                                            method: verb,
+                                            span: Span::new(tok.span.start, method_span.end),
+                                        },
+                                        args,
+                                        span: Span::new(tok.span.start, end.end),
+                                    });
+                                }
+                                "Headers" => {
+                                    self.expect(TokenKind::Dot)?;
+                                    let (ctor, ctor_span) = self.expect_method_name()?;
+                                    if ctor != "new" {
+                                        return Err(Diagnostic::new(
+                                            "expected Headers.new()",
+                                            ctor_span,
+                                        ));
+                                    }
+                                    self.expect(TokenKind::LParen)?;
+                                    let end = self.expect(TokenKind::RParen)?;
+                                    return Ok(Expr::Call {
+                                        callee: Callee::StdHttpHeadersNew {
+                                            span: Span::new(tok.span.start, ctor_span.end),
+                                        },
+                                        args: vec![],
+                                        span: Span::new(tok.span.start, end.end),
+                                    });
+                                }
+                                "Response" => {
+                                    self.expect(TokenKind::Dot)?;
+                                    let (ctor, ctor_span) = self.expect_method_name()?;
+                                    let kind = match ctor.as_str() {
+                                        "text" => HttpResponseKind::Text,
+                                        "json" => HttpResponseKind::Json,
+                                        "empty" => HttpResponseKind::Empty,
+                                        _ => {
+                                            return Err(Diagnostic::new(
+                                                "expected Response.text|json|empty(...)",
+                                                ctor_span,
+                                            ));
+                                        }
+                                    };
+                                    self.expect(TokenKind::LParen)?;
+                                    let args = self.parse_arg_list()?;
+                                    let end = self.expect(TokenKind::RParen)?;
+                                    return Ok(Expr::Call {
+                                        callee: Callee::StdHttpResponseNew {
+                                            kind,
+                                            span: Span::new(tok.span.start, ctor_span.end),
+                                        },
+                                        args,
+                                        span: Span::new(tok.span.start, end.end),
+                                    });
+                                }
+                                "Server" => {
+                                    self.expect(TokenKind::Dot)?;
+                                    let (ctor, ctor_span) = self.expect_method_name()?;
+                                    if ctor != "new" {
+                                        return Err(Diagnostic::new(
+                                            "expected Server.new()",
+                                            ctor_span,
+                                        ));
+                                    }
+                                    self.expect(TokenKind::LParen)?;
+                                    let end = self.expect(TokenKind::RParen)?;
+                                    return Ok(Expr::Call {
+                                        callee: Callee::StdHttpServerNew {
+                                            span: Span::new(tok.span.start, ctor_span.end),
+                                        },
+                                        args: vec![],
+                                        span: Span::new(tok.span.start, end.end),
+                                    });
+                                }
+                                "Request" => {
+                                    return Err(Diagnostic::new(
+                                        "std.http.Request is a type — use it in annotations",
+                                        method_span,
+                                    ));
+                                }
+                                _ => {
+                                    return Err(Diagnostic::new(
+                                        "unknown std.http member",
+                                        method_span,
+                                    ));
+                                }
                             }
-                            self.expect(TokenKind::LParen)?;
-                            let args = self.parse_arg_list()?;
-                            let end = self.expect(TokenKind::RParen)?;
-                            return Ok(Expr::Call {
-                                callee: Callee::StdHttpGet {
-                                    span: Span::new(tok.span.start, method_span.end),
-                                },
-                                args,
-                                span: Span::new(tok.span.start, end.end),
-                            });
                         }
                         "task" => {
                             self.expect(TokenKind::Dot)?;

@@ -1,0 +1,26 @@
+@import "std"
+
+async fn main() {
+    match await std.http.get("http://127.0.0.1:18080/health") {
+        ok(res) => {
+            std.log("health status=$1 body=$2", res.status(), res.body())
+        }
+        err(e) => { std.log("health err=$1", e) }
+    }
+
+    match await std.http.get("http://127.0.0.1:18080/users/42") {
+        ok(res) => {
+            std.log("user status=$1 body=$2", res.status(), res.body())
+        }
+        err(e) => { std.log("user err=$1", e) }
+    }
+
+    var headers = std.http.Headers.new()
+    headers.set("Content-Type", "text/plain")
+    match await std.http.post("http://127.0.0.1:18080/echo", "ping", headers) {
+        ok(res) => {
+            std.log("echo status=$1 body=$2", res.status(), res.body())
+        }
+        err(e) => { std.log("echo err=$1", e) }
+    }
+}

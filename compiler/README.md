@@ -25,6 +25,7 @@ cargo test --manifest-path compiler/Cargo.toml
 - Closures: `fn(params) Ret {…}`
 - Stdlib: `log`, `panic`, `env`, `process`, `fs` (sync), `time`, `string`, `List<T>`, `Result`/`Option` (any value `T`, including class/iclass)
 - Serde: `@encodeProperty` / `@ignore` on fields; `std.json` / `yaml` / `toml` / `toon` `.encode` / `.decode<T>`
+- HTTP: `std.http` async client (`get`/`post`/…) → `Future<Result<Response,string>>`; `Server` Express-style (`get`/`post`/… + `listen`); `http://` only
 - Generics: `fn identity<T>(T x) T` with monomorphization; type args on calls (`decode<User>(…)`); `class Box<T>` still pending
 - Typecheck: O(1) named-type lookup; class → base / iclass assignability
 - Types in annotations: bare `Option<T>` / `List<T>` (same as `std.Option` / `std.List`)

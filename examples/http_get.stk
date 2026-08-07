@@ -1,9 +1,9 @@
 @import "std"
 
-fn main() {
-    // Offline-friendly: invalid host → err arm
-    match std.http.get("http://127.0.0.1:1/") {
-        ok(body) => { std.log("unexpected ok len=$1", std.string.len(body)) }
+async fn main() {
+    // Offline-friendly: closed high port → err arm
+    match await std.http.get("http://127.0.0.1:59999/") {
+        ok(res) => { std.log("unexpected ok status=$1", res.status()) }
         err(e) => { std.log("http err ok") }
     }
 }

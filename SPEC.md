@@ -56,6 +56,7 @@ fn        async     await     spawn     pub
 priv      prot      class     iclass    new
 var       const     return    if        else
 while     for       break     continue  match
+do        try       catch
 true      false     null      self      super
 as        import    module    defer
 ```
@@ -374,7 +375,7 @@ Funções `async` **sempre retornam** `Future<T>`, onde `T` é o tipo resolvido 
 
 ```stk
 async fn fetchCount() int {
-    var body = await std.http.get("https://example.com/count")
+    var body = await std.http.get("http://example.com/count")
     return std.string.parseInt(body)
 }
 // tipo efetivo: () -> Future<int>
@@ -418,7 +419,7 @@ Steampunk trata concorrência e paralelismo como parte do núcleo da linguagem �
 > - Closures `fn(params) Ret {…}` com params/retorno de qualquer tipo de valor (`void` só no retorno).
 > - Entry: `fn main` ou `async fn main`.
 > - `float` (f64): sem promoção implícita `int`→`float`; `%` só para `int`.
-> - `std.string`, `std.env`, `std.process`, `std.fs`, `std.time`, `std.panic`, `std.http.get` (`http://`), `std.task.yield` / `CancellationToken`.
+> - `std.string`, `std.env`, `std.process`, `std.fs`, `std.time`, `std.panic`, `std.http` client+server (`http://`), serde (`json`/`yaml`/`toml`/`toon`), `std.task.yield` / `CancellationToken`.
 > - `std.parallel.map(List<int>, fnName)` aplica `fn(int) int` em paralelo.
 > - `struct` = sinônimo de `class`. Genéricos de usuário (`fn f<T>`, `class Box<T>`) com monomorphização.
 > - CLI: `deps`, `script`, `test`, `fmt`; LSP: `steampunk-lsp`.
@@ -858,7 +859,7 @@ Condições de `if`/`while` devem ser `bool` (sem truthiness implícita).
 Precedência (maior → menor):
 
 1. Chamada/membro: `()`, `.`, `new`
-2. Async/prefixo: `await` (e forma expression de prefixos)
+2. Async/prefixo: `await`, `try` / `try?` / `try!`
 3. Unários: `-`, `!`, `&`
 4. Multiplicativos: `*`, `/`, `%`
 5. Aditivos: `+`, `-`
@@ -944,12 +945,12 @@ Módulos da stdlib:
 | `std.sync` | pronto | `Channel<T>` / `Mutex<T>` / `RwLock<T>` / `WaitGroup` |
 | `std.parallel` | 0.2 | `map` / `reduce` sobre `List`/`array` via pool CPU |
 | `std.task` | 0.4 | `yield`, `CancellationToken` |
-| `std.http` | 0.3 | `get`/`post` → `Future<Result<string, string>>` |
+| `std.http` | pronto (http://) | Client async + `Server` REST (ver §14.2); HTTPS fora do MVP |
 | `std.net` | 0.3 | TCP básico async |
 | `std.json` | pronto | `encode(T) string`; `decode<T>(string) Result<T,string>` |
 | `std.yaml` | pronto | idem (YAML 1.2 subset ↔ mesmo modelo) |
 | `std.toml` | pronto | idem (TOML; sem `null` — ver abaixo) |
-| `std.toon` | pronto | idem ([TOON](https://github.com/toon-format/spec) ↔ modelo JSON) |
+| `std.toon` | pronto | idem ([TOON](http://github.com/toon-format/spec) ↔ modelo JSON) |
 
 ### 14.1 Serialização tipada
 
@@ -967,6 +968,46 @@ match std.json.decode<User>(text) {
 - `Option.none`: JSON/YAML/TOON → `null` ou chave omitida; TOML → chave omitida no encode; chave ausente → `none` no decode.
 - Campos `@ignore` e membros não-serializáveis (`Future`, channels, funções, …) não entram; estes últimos em campo sem `@ignore` = erro de compilação.
 
+### 14.2 HTTP client e server (REST, `http://`)
+
+I/O async: client e `listen` retornam `Future`. Só **`http://`** neste MVP (HTTPS = erro em runtime).
+
+**Tipos**
+
+| Tipo | API |
+|------|-----|
+| `std.http.Headers` | `new()`; `set(k,v)`; `get(k) → Option<string>` |
+| `std.http.Request` | `method()` / `path()` / `body()` → `string`; `query(name)` / `header(name)` → `Option<string>`; `param(name)` → `string` (path `:id`, vazio se ausente) |
+| `std.http.Response` | `text(status, body)` / `json(status, body)` / `empty(status)`; `status()` / `body()`; `setHeader(k,v)` / `header(k) → Option<string>` |
+| `std.http.Server` | `new()`; `get\|post\|put\|delete\|patch(path, handler)`; `listen(port) → Future<Result<int,string>>` |
+
+**Client** — todos → `Future<Result<Response, string>>`:
+
+| API | Args |
+|-----|------|
+| `get` / `delete` | `(url)` ou `(url, Headers)` |
+| `post` / `put` / `patch` | `(url, body)` ou `(url, body, Headers)` |
+
+**Server** — handlers MVP: `fn(Request) Response` (síncronos). Path params: `/users/:id`. `listen` completa com `err` em falha de bind; em sucesso o future permanece pendente enquanto o servidor aceita conexões (`ok(0)` só se o servidor encerrar limpo).
+
+```stk
+@import "std"
+
+async fn main() {
+    var app = std.http.Server.new()
+    app.get("/health", fn(std.http.Request _req) std.http.Response {
+        return std.http.Response.text(200, "ok")
+    })
+    app.get("/users/:id", fn(std.http.Request req) std.http.Response {
+        return std.http.Response.json(200, std.string.concat("{\"id\":\"", std.string.concat(req.param("id"), "\"}")))
+    })
+    match await app.listen(8080) {
+        ok(_) => {}
+        err(e) => { std.log("listen: $1", e) }
+    }
+}
+```
+
 Exemplo mínimo:
 
 ```stk
@@ -983,7 +1024,7 @@ Exemplo async:
 @import "std"
 
 async fn main() {
-    var body = await std.http.get("https://example.com")
+    var body = await std.http.get("http://example.com")
     std.log("$1", body)
 }
 ```
@@ -992,7 +1033,7 @@ async fn main() {
 
 ## 15. Erros
 
-v0.1 usa retorno explícito com `std.Result` / `std.Option` — sem exceções.
+v0.1 usa retorno explícito com `std.Result` / `std.Option` — **sem exceções de stack**. `match` continua válido; `do` / `try` / `catch` é sugar sobre `Result` (estilo Swift).
 
 ```stk
 fn parseInt(string s) std.Result<int, string> {
@@ -1006,6 +1047,32 @@ fn main() {
     }
 }
 ```
+
+### 15.1 `do` / `try` / `catch`
+
+```stk
+@import "std"
+
+async fn main() {
+    do {
+        var res = try await std.http.get("http://127.0.0.1:59999/")
+        std.log("status=$1", res.status())
+    } catch e {
+        std.log("http: $1", e)
+    }
+}
+```
+
+| Forma | Semântica |
+|-------|-----------|
+| `do { … } catch name { … }` | Bloco; `try` sem sucesso salta para `catch` com o valor `err` |
+| `try expr` | `expr` deve ser `Result<T,E>`; produz `T`; só dentro de `do` |
+| `try? expr` | `Result<T,E>` → `Option<T>` (`ok`→`some`, `err`→`none`); **não** exige `do` |
+| `try! expr` | Em `err`, chama `std.panic` com a mensagem (se `E` for `string`) ou `"try! failed"`; produz `T`; **não** exige `do` |
+
+- Todos os `try` (unwrap) no mesmo `do` devem compartilhar o mesmo tipo de erro `E` (o tipo de `name` no `catch`).
+- `try await …` é válido: `await` produz o `Result`, `try` desembrulha.
+- `break` / `continue` / `return` dentro de `do`/`catch` seguem as regras normais do bloco envolvente.
 
 `std.panic(string msg)` aborta o processo em erros irrecuperáveis de programação.
 
@@ -1199,14 +1266,16 @@ PropBody       = "{" { "get" Block | "set" "(" Param ")" Block } "}" ;
 
 Block          = "{" { Stmt } "}" ;
 Stmt           = VarDecl | ReturnStmt | IfStmt | WhileStmt | ForStmt
-               | MatchStmt | SpawnStmt | ExprStmt | Block ;
+               | MatchStmt | DoCatchStmt | SpawnStmt | ExprStmt | Block ;
 
 VarDecl        = "var" Ident [ Type ] "=" Expr ;
 ReturnStmt     = "return" [ Expr ] ;
 SpawnStmt      = "spawn" ( CallExpr | Block ) ;
+DoCatchStmt    = "do" Block "catch" Ident Block ;
 
 Expr           = Assignment | LogicOr ;
-Prefix         = "await" Prefix | Unary ;
+Prefix         = "await" Prefix | TryPrefix | Unary ;
+TryPrefix      = "try" [ "?" | "!" ] Prefix ;
 Primary        = Ident | Literal | "new" Ident "(" ArgList ")"
                | "self" | "super" | "(" Expr ")" | FnLiteral
                | AsyncBlock ;
@@ -1317,18 +1386,18 @@ async fn fetchTitle(string url) string {
 async fn main() {
     // Future: composição tipada
     var titles = await Future.join(
-        fetchTitle("https://a.example"),
-        fetchTitle("https://b.example")
+        fetchTitle("http://a.example"),
+        fetchTitle("http://b.example")
     )
     std.log("$1 | $2", titles.0, titles.1)
 
     // spawn = goroutine (estilo Go); sync via channel
     var ch = std.sync.Channel<string>.new()
     spawn {
-        ch.send(await fetchTitle("https://c.example"))
+        ch.send(await fetchTitle("http://c.example"))
     }
     spawn {
-        ch.send(await fetchTitle("https://d.example"))
+        ch.send(await fetchTitle("http://d.example"))
     }
     std.log("first=$1", await ch.recv())
     std.log("second=$1", await ch.recv())
@@ -1350,7 +1419,7 @@ async fn main() {
 |------|---------|
 | 0.1 | Frontend + async thread-backed (worker pool); OOP; `struct`; closures; `float`; Result/Option/List; env/process/fs/time/string/panic; Channel/Mutex/Future int\|string; `std.cpu.submit` — **mínimo usável** |
 | 0.2 | Worker pool; parallel.map; RwLock; struct; genéricos fn + type-args em calls; decorators `@encodeProperty`/`@ignore`; `std.json`/`yaml`/`toml`/`toon` encode/decode tipado |
-| 0.3 | Manifesto `.stkm` (`deps`/`script`/`test`); cache global stub; `std.http.get` (http://); formatter `fmt` |
+| 0.3 | Manifesto `.stkm` (`deps`/`script`/`test`); cache global stub; `std.http` client+server REST (`http://`); formatter `fmt` |
 | 0.4 | LSP mínimo (`steampunk-lsp`); `std.task.yield` + `CancellationToken` |
 
 ---
@@ -1376,6 +1445,8 @@ Das capturas em `main.stk` e decisões de núcleo:
 15. Dependências pré-compiladas (`.stkb` + `.stkmap`) ficam em cache **global** (`~/.steampunk/deps`); reutilizadas entre projetos na mesma versão; copiadas para o binário do app só em tempo de compilação/link.
 16. Decorators de membro (`@name` / `@name(…)`); built-ins de serde `@encodeProperty` / `@ignore`; `@import` não é decorator.
 17. Serialização tipada via `std.json` / `std.yaml` / `std.toml` / `std.toon` com monomorphização.
+18. `std.http` REST: client async (`Future<Result<Response,string>>`) + `Server` estilo Express; só `http://` no MVP; handlers `fn(Request) Response`.
+19. Erros: `Result`/`Option` sem exceções; `do`/`try`/`catch` e `try?`/`try!` são sugar sobre `Result` (estilo Swift).
 
 ---
 

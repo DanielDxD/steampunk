@@ -50,7 +50,8 @@ jobs:
             archive: tar.gz
             binary: steampunk
             use_cross: true
-          - os: macos-13
+          # macos-13 (Intel) was retired Dec 2025 — use macos-15-intel (last x86_64 image).
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             archive: tar.gz
             binary: steampunk

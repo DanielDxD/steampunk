@@ -913,6 +913,111 @@ int64_t stk_http_get(int64_t url) {
     return stk_tagged(1, (int64_t)(uintptr_t)stk_str_dup("AOT http.get not implemented"));
 }
 
+int64_t stk_http_client(int64_t method, int64_t url, int64_t body, int64_t headers) {
+    (void)method;
+    (void)url;
+    (void)body;
+    (void)headers;
+    /* Return a ready Future with err — full AOT HTTP mirrors Rust JIT runtime. */
+    int64_t fut = stk_future_new();
+    stk_future_complete(
+        fut,
+        stk_tagged(1, (int64_t)(uintptr_t)stk_str_dup("AOT http client not implemented"))
+    );
+    return fut;
+}
+
+int64_t stk_http_headers_new(void) {
+    return (int64_t)(uintptr_t)calloc(1, 8);
+}
+void stk_http_headers_set(int64_t h, int64_t k, int64_t v) {
+    (void)h;
+    (void)k;
+    (void)v;
+}
+int64_t stk_http_headers_get(int64_t h, int64_t k) {
+    (void)h;
+    (void)k;
+    return stk_tagged(1, 0);
+}
+
+int64_t stk_http_response_text(int64_t status, int64_t body) {
+    int64_t *r = calloc(3, sizeof(int64_t));
+    r[0] = status;
+    r[1] = body;
+    return (int64_t)(uintptr_t)r;
+}
+int64_t stk_http_response_json(int64_t status, int64_t body) {
+    return stk_http_response_text(status, body);
+}
+int64_t stk_http_response_empty(int64_t status) {
+    return stk_http_response_text(status, (int64_t)(uintptr_t)stk_str_dup(""));
+}
+int64_t stk_http_response_status(int64_t r) {
+    return ((int64_t *)(uintptr_t)r)[0];
+}
+int64_t stk_http_response_body(int64_t r) {
+    return ((int64_t *)(uintptr_t)r)[1];
+}
+void stk_http_response_set_header(int64_t r, int64_t k, int64_t v) {
+    (void)r;
+    (void)k;
+    (void)v;
+}
+int64_t stk_http_response_header(int64_t r, int64_t k) {
+    (void)r;
+    (void)k;
+    return stk_tagged(1, 0);
+}
+
+int64_t stk_http_request_method(int64_t r) {
+    (void)r;
+    return (int64_t)(uintptr_t)stk_str_dup("GET");
+}
+int64_t stk_http_request_path(int64_t r) {
+    (void)r;
+    return (int64_t)(uintptr_t)stk_str_dup("/");
+}
+int64_t stk_http_request_body(int64_t r) {
+    (void)r;
+    return (int64_t)(uintptr_t)stk_str_dup("");
+}
+int64_t stk_http_request_query(int64_t r, int64_t n) {
+    (void)r;
+    (void)n;
+    return stk_tagged(1, 0);
+}
+int64_t stk_http_request_header(int64_t r, int64_t n) {
+    (void)r;
+    (void)n;
+    return stk_tagged(1, 0);
+}
+int64_t stk_http_request_param(int64_t r, int64_t n) {
+    (void)r;
+    (void)n;
+    return (int64_t)(uintptr_t)stk_str_dup("");
+}
+
+int64_t stk_http_server_new(void) {
+    return (int64_t)(uintptr_t)calloc(1, 8);
+}
+void stk_http_server_route(int64_t s, int64_t m, int64_t p, int64_t h) {
+    (void)s;
+    (void)m;
+    (void)p;
+    (void)h;
+}
+int64_t stk_http_server_listen(int64_t s, int64_t port) {
+    (void)s;
+    (void)port;
+    int64_t fut = stk_future_new();
+    stk_future_complete(
+        fut,
+        stk_tagged(1, (int64_t)(uintptr_t)stk_str_dup("AOT http server not implemented"))
+    );
+    return fut;
+}
+
 /* ---- typed serde (schema-driven; mirrors JIT serde_rt.rs) ---- */
 
 typedef struct StkBuf {

@@ -1,0 +1,27 @@
+@import "std"
+
+async fn main() {
+    var app = std.http.Server.new()
+
+    app.get("/health", fn(std.http.Request req) std.http.Response {
+        return std.http.Response.text(200, "ok")
+    })
+
+    app.get("/users/:id", fn(std.http.Request req) std.http.Response {
+        var id = req.param("id")
+        var body = std.string.concat("{\"id\":\"", std.string.concat(id, "\"}"))
+        return std.http.Response.json(200, body)
+    })
+
+    app.post("/echo", fn(std.http.Request req) std.http.Response {
+        return std.http.Response.text(200, req.body())
+    })
+
+    std.log("listening on 18080")
+    do {
+        try await app.listen(18080)
+        std.log("server stopped")
+    } catch e {
+        std.log("listen err=$1", e)
+    }
+}

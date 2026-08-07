@@ -109,6 +109,24 @@ async fn main() {
 }
 ```
 
+### do / try / catch (Result sugar)
+
+```stk
+@import "std"
+
+fn main() {
+    do {
+        var n = try std.string.parseInt("42")
+        std.log("n=$1", n)
+    } catch e {
+        std.log("err: $1", e)
+    }
+
+    var opt = try? std.string.parseInt("x")   // Option
+    var n = try! std.string.parseInt("7")     // panic on err
+}
+```
+
 ## Checklist
 
 - [ ] `@import` at top

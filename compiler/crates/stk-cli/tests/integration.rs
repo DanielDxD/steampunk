@@ -1322,6 +1322,124 @@ fn run_http_get_err() {
 }
 
 #[test]
+fn run_http_listen_err() {
+    let output = Command::new(steampunk_bin())
+        .args(["run"])
+        .arg(examples_dir().join("http_listen_err.stk"))
+        .output()
+        .expect("run");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("listen err ok"), "stdout={stdout}");
+}
+
+#[test]
+fn http_client_against_local_server() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let body = "hello-stk";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+    thread::sleep(Duration::from_millis(50));
+
+    let dir = std::env::temp_dir().join(format!("stk-http-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("client.stk");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+@import "std"
+async fn main() {{
+    match await std.http.get("http://127.0.0.1:{port}/") {{
+        ok(res) => {{
+            std.log("status=$1 body=$2", res.status(), res.body())
+        }}
+        err(e) => {{
+            std.log("err=$1", e)
+            std.panic("client failed")
+        }}
+    }}
+}}
+"#
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(steampunk_bin())
+        .args(["run"])
+        .arg(&path)
+        .output()
+        .expect("run client");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("status=200") && stdout.contains("hello-stk"),
+        "stdout={stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn http_server_client_roundtrip() {
+    use std::thread;
+    use std::time::Duration;
+
+    let mut child = Command::new(steampunk_bin())
+        .args(["run"])
+        .arg(examples_dir().join("http_api_server.stk"))
+        .spawn()
+        .expect("spawn server");
+    thread::sleep(Duration::from_millis(400));
+
+    let output = Command::new(steampunk_bin())
+        .args(["run"])
+        .arg(examples_dir().join("http_api_client.stk"))
+        .output()
+        .expect("run client");
+    let _ = child.kill();
+    let _ = child.wait();
+    // Ensure port is free for other tests
+    thread::sleep(Duration::from_millis(100));
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("health status=200")
+            && stdout.contains("user status=200")
+            && stdout.contains("echo status=200")
+            && stdout.contains("ping"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
 fn run_universal_types() {
     let output = Command::new(steampunk_bin())
         .args(["run"])
@@ -1457,6 +1575,26 @@ fn main() {
         "stderr={stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn run_do_try_catch() {
+    let output = Command::new(steampunk_bin())
+        .args(["run"])
+        .arg(examples_dir().join("do_try_catch.stk"))
+        .output()
+        .expect("run steampunk");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ok n=42"), "stdout={stdout}");
+    assert!(stdout.contains("caught parse"), "stdout={stdout}");
+    assert!(stdout.contains("try? some=7"), "stdout={stdout}");
+    assert!(stdout.contains("try? none"), "stdout={stdout}");
+    assert!(stdout.contains("try! n=99"), "stdout={stdout}");
 }
 
 #[test]

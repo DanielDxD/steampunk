@@ -488,44 +488,7 @@ pub unsafe extern "C" fn stk_parallel_map_int(list: i64, fn_ptr: i64) -> i64 {
     out
 }
 
-/// Blocking HTTP GET (http:// only, MVP). Returns Result<string,string> tagged.
-#[no_mangle]
-pub unsafe extern "C" fn stk_http_get(url: i64) -> i64 {
-    let url = cstr_to_string(url);
-    match http_get_blocking(&url) {
-        Ok(body) => make_tagged(0, string_to_cstr(body)),
-        Err(e) => make_tagged(1, string_to_cstr(e)),
-    }
-}
-
-fn http_get_blocking(url: &str) -> Result<String, String> {
-    let url = url
-        .strip_prefix("http://")
-        .ok_or_else(|| "MVP std.http.get only supports http:// URLs".to_string())?;
-    let (host_port, path) = match url.split_once('/') {
-        Some((h, p)) => (h, format!("/{p}")),
-        None => (url, "/".to_string()),
-    };
-    let (host, port) = if let Some((h, p)) = host_port.split_once(':') {
-        (h, p.parse::<u16>().map_err(|_| "bad port".to_string())?)
-    } else {
-        (host_port, 80u16)
-    };
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-    let mut stream = TcpStream::connect((host, port)).map_err(|e| e.to_string())?;
-    let req = format!(
-        "GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    );
-    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
-    let mut buf = String::new();
-    stream.read_to_string(&mut buf).map_err(|e| e.to_string())?;
-    if let Some(idx) = buf.find("\r\n\r\n") {
-        Ok(buf[idx + 4..].to_string())
-    } else {
-        Ok(buf)
-    }
-}
+/// Blocking HTTP GET moved to `http_rt.rs`.
 
 #[no_mangle]
 pub unsafe extern "C" fn stk_task_yield() {

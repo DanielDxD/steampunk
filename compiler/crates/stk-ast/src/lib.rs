@@ -155,6 +155,14 @@ pub enum TypeName {
     Option(Box<TypeName>),
     /// `std.List<T>` (T = any value type)
     List(Box<TypeName>),
+    /// `std.http.Request`
+    HttpRequest,
+    /// `std.http.Response`
+    HttpResponse,
+    /// `std.http.Headers`
+    HttpHeaders,
+    /// `std.http.Server`
+    HttpServer,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +248,13 @@ pub enum Stmt {
     Match {
         scrutinee: Expr,
         arms: Vec<MatchArm>,
+        span: Span,
+    },
+    /// `do { … } catch name { … }`
+    DoCatch {
+        body: Block,
+        catch_name: String,
+        catch_body: Block,
         span: Span,
     },
 }
@@ -330,6 +345,12 @@ pub enum Expr {
         span: Span,
     },
     Await {
+        expr: Box<Expr>,
+        span: Span,
+    },
+    /// `try expr` | `try? expr` | `try! expr`
+    Try {
+        mode: TryMode,
         expr: Box<Expr>,
         span: Span,
     },
@@ -438,8 +459,20 @@ pub enum Callee {
     StdRwLockNew { elem: Box<TypeName>, span: Span },
     /// `std.parallel.map(list, fn)`
     StdParallelMap { span: Span },
-    /// `std.http.get(url)`
-    StdHttpGet { span: Span },
+    /// `std.http.get|post|put|delete|patch(...)`
+    StdHttpClient {
+        method: HttpClientMethod,
+        span: Span,
+    },
+    /// `std.http.Headers.new()`
+    StdHttpHeadersNew { span: Span },
+    /// `std.http.Response.text|json|empty(...)`
+    StdHttpResponseNew {
+        kind: HttpResponseKind,
+        span: Span,
+    },
+    /// `std.http.Server.new()`
+    StdHttpServerNew { span: Span },
     /// `std.task.yield()`
     StdTaskYield { span: Span },
     /// `std.task.CancellationToken.new()`
@@ -461,6 +494,22 @@ pub enum Callee {
     FutureRace { span: Span },
     /// `Future.ready(v)` — T → `Future<T>` (any value T)
     FutureReady { span: Span },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpClientMethod {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Patch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpResponseKind {
+    Text,
+    Json,
+    Empty,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -489,6 +538,16 @@ pub enum BinOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TryMode {
+    /// `try expr` — unwrap inside `do`, propagate err to `catch`
+    Unwrap,
+    /// `try? expr` → `Option<T>`
+    Option,
+    /// `try! expr` — panic on err
+    Force,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Not,
     Neg,
@@ -511,6 +570,7 @@ impl Expr {
             | Expr::FieldGet { span, .. }
             | Expr::MethodCall { span, .. }
             | Expr::Await { span, .. }
+            | Expr::Try { span, .. }
             | Expr::AsyncBlock { span, .. }
             | Expr::Closure { span, .. }
             | Expr::Binary { span, .. }

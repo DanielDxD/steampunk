@@ -1,0 +1,30 @@
+@import "std"
+
+fn main() {
+    do {
+        var n = try std.string.parseInt("42")
+        std.log("ok n=$1", n)
+    } catch e {
+        std.log("unexpected: $1", e)
+    }
+
+    do {
+        var n = try std.string.parseInt("nope")
+        std.log("should not print $1", n)
+    } catch e {
+        std.log("caught parse")
+    }
+
+    match try? std.string.parseInt("7") {
+        some(n) => { std.log("try? some=$1", n) }
+        none => { std.panic("expected some") }
+    }
+
+    match try? std.string.parseInt("x") {
+        some(n) => { std.panic("expected none") }
+        none => { std.log("try? none") }
+    }
+
+    var forced = try! std.string.parseInt("99")
+    std.log("try! n=$1", forced)
+}

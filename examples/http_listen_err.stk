@@ -1,0 +1,13 @@
+@import "std"
+
+async fn main() {
+    var app = std.http.Server.new()
+    app.get("/ping", fn(std.http.Request req) std.http.Response {
+        return std.http.Response.text(200, "pong")
+    })
+    // Invalid port → err without hanging.
+    match await app.listen(70000) {
+        ok(n) => { std.panic("expected listen failure") }
+        err(e) => { std.log("listen err ok") }
+    }
+}
